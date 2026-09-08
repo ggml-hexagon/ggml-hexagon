@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -154,6 +155,7 @@ struct ggml_backend_hexagon_context {
 
     int n_threads;
     int dsp_thread_counts = 0;                  // actual worker threads in effect on NPU (max_hw_threads - 2)
+    int dsp_thread_counts_max = 0;              // safe upper bound reported by NPU at init
 
     //HTP resource management
     int physical_idx;           // physical CDSP index (from device config)
@@ -328,7 +330,13 @@ struct hexagon_appcfg_t {
     int dump_diag_info;         // enable/disable dump diag info for troubleshooting issues on HTP side
     int ndev;                   // number of Hexagon devices (PDs), from GGML_HEXAGON_NDEV env
     int rpc_mmap_mode;          // 0=FASTRPC_MAP_FD_DELAYED (default), 1=FASTRPC_MAP_FD (eager pinning)
-    int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
+    int enable_opfusion;        // fusion control bitmask (like Qualcomm's opt_opfusion).
+                                //   0 = all fusions disabled
+                                //   1 = all fusions enabled (backward compatible)
+                                //   bitmask (values >= 2): selective enable
+                                //     bit 0 (0x1): RMS_NORM + MUL
+                                //     bit 1 (0x2): QKV/FFN NX (3x/2x MUL_MAT batched)
+                                //     bit 2 (0x4): MUL_MAT + ADD (bias fusion)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
     int dsp_cache_mode;         // NPU-side entry.c cache optimization bitmask, pushed to NPU at init via
                                 //   execute_batch(0xFFFC) special mode. All four bits
@@ -354,9 +362,11 @@ struct hexagon_appcfg_t {
                                 //   execute_batch(0xFFFC) payload. Pair with dsp_cache_trace_bit0
                                 //   to localize the stale-L2-read culprit.
     int enable_graph_optimize;  // enable/disable cgraph reorder pass
+    int enable_graph_cache;     // enable/disable graph cache (1=enable, 0=disable, default=1)
 
     const char * cfgfilename;
     char version[GGMLHEXAGON_TMPBUF_LEN];
+    std::string enabled_ops;    // comma-separated list of ops to offload (empty = all supported ops)
 };
 
 // designated initializers are a C++20 extension; suppress to keep readability in C++17 builds
@@ -376,9 +386,27 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dsp_cache_trace_bit0   = 0,
         .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
+        .enable_graph_cache     = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
         .version                = {GGML_HEXAGON_VERSION},
+        .enabled_ops            = "all",
 };
+
+// Op fusion bitmask flags (mirrors Qualcomm's ggml_hexagon_fusion_flags).
+enum opfusion_flag_t {
+    OPFUSE_RMS_NORM_MUL = (1 << 0),  // 0x1: RMS_NORM + MUL
+    OPFUSE_QKV_FFN_NX   = (1 << 1),  // 0x2: QKV/FFN NX (3x/2x MUL_MAT batched)
+    OPFUSE_MUL_MAT_ADD  = (1 << 2),  // 0x4: MUL_MAT + ADD (bias fusion)
+};
+
+// Selective fusion enable check (mirrors Qualcomm's ggml_hexagon_is_fusion_enabled).
+//   0 = all off, 1 = all on (backward compat), bitmask = selective
+static inline bool is_opfusion_enabled(int flag) {
+    int v = g_hexagon_appcfg.enable_opfusion;
+    if (v <= 0) return false;
+    if (v == 1) return true;
+    return (v & flag) != 0;
+}
 
 //TODO: add descriptors for more supported Snapdragon devices
 static struct qcom_socinfo g_hexagon_soc_info_table[] = {
@@ -539,22 +567,90 @@ static int hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx) {
     return err;
 }
 
+// Logging convention in this function:
+//   VERBOSE -> terminal + adb logcat (key summary for immediate visibility)
+//   ALWAYS  -> adb logcat only (detailed diagnostics for post-analysis)
 static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * ctx) {
     char timestamp[GGMLHEXAGON_TMPBUF_LEN];
     memset(timestamp, 0, GGMLHEXAGON_TMPBUF_LEN);
 
     GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version:             %s", g_hexagon_appcfg.version);
     ggmlhexagon_get_timestring(timestamp);
-    GGMLHEXAGON_LOG_VERBOSE("thread_counts on HTP:             %d", g_hexagon_appcfg.thread_counts);
+    GGMLHEXAGON_LOG_VERBOSE("initial thread_counts on HTP:     %d (runtime -t takes effect at first graph compute)", g_hexagon_appcfg.thread_counts);
     GGMLHEXAGON_LOG_VERBOSE("rpc_mmap_mode:                    %d", g_hexagon_appcfg.rpc_mmap_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
-    GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit0:             %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
-    GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit1:             %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
+    GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit0:              %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
+    GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit1:              %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(NPU):              %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(AP):               %d", g_hexagon_appcfg.dump_debug_info);
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
-    GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d", g_hexagon_appcfg.enable_opfusion);
+    // 0 = all off, 1 = all on (backward compat), >= 2 = bitmask selective
+    if (g_hexagon_appcfg.enable_opfusion <= 0) {
+        GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d (all fusions disabled)", g_hexagon_appcfg.enable_opfusion);
+    } else if (g_hexagon_appcfg.enable_opfusion == 1) {
+        GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d (all fusions enabled, default)", g_hexagon_appcfg.enable_opfusion);
+    } else {
+        GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d (bitmask: 0x1=RMS_NORM_MUL 0x2=QKV_FFN_NX 0x4=MUL_MAT_ADD)", g_hexagon_appcfg.enable_opfusion);
+    }
+    GGMLHEXAGON_LOG_VERBOSE("enable graph_cache:               %d", g_hexagon_appcfg.enable_graph_cache);
+    GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
+}
+
+static inline bool is_all_token(std::string_view s) {
+    if (s.size() != 3)
+        return false;
+
+    return s == "all" || s == "ALL";
+}
+
+// Check if an op is allowed by the enabled_ops config filter.
+// Returns true when:
+//   - enabled_ops is empty or contains "all" or the op name
+static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
+    if (g_hexagon_appcfg.enabled_ops.empty()) {
+        return true;
+    }
+
+    if (is_all_token(g_hexagon_appcfg.enabled_ops)) {
+        return true;
+    }
+
+    const char * op_name = ggml_op_name(op);
+    // Check if op_name appears as a whole word in the comma-separated list
+    const std::string & list = g_hexagon_appcfg.enabled_ops;
+    size_t pos = 0;
+    while (pos < list.size()) {
+        size_t end = list.find(',', pos);
+        if (end == std::string::npos) end = list.size();
+        std::string token = list.substr(pos, end - pos);
+        // trim whitespace
+        size_t start = token.find_first_not_of(" \t");
+        size_t last = token.find_last_not_of(" \t");
+        if (start != std::string::npos && last != std::string::npos) {
+            token = token.substr(start, last - start + 1);
+        }
+        // "all" keyword enables all ops
+        if (token.size() == 3 &&
+            tolower((unsigned char)token[0]) == 'a' &&
+            tolower((unsigned char)token[1]) == 'l' &&
+            tolower((unsigned char)token[2]) == 'l') {
+            return true;
+        }
+        // case-insensitive compare
+        if (token.size() == strlen(op_name)) {
+            bool match = true;
+            for (size_t i = 0; i < token.size(); ++i) {
+                if (tolower((unsigned char)token[i]) != tolower((unsigned char)op_name[i])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        pos = end + 1;
+    }
+    return false;
 }
 
 // =================================================================================================
@@ -759,6 +855,8 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit0", g_hexagon_appcfg.dsp_cache_trace_bit0, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit1", g_hexagon_appcfg.dsp_cache_trace_bit1, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_graph_optimize", g_hexagon_appcfg.enable_graph_optimize, 1);
+    hexagoncfg_instance.get_intvalue("cdsp", "enable_graph_cache", g_hexagon_appcfg.enable_graph_cache, 1);
+    hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
 
     snprintf(g_hexagon_appcfg.version, GGMLHEXAGON_TMPBUF_LEN, "%s", version.c_str());
 
@@ -1890,6 +1988,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         if (ctx->dsp_thread_counts > 0) {
             g_hexagon_appcfg.thread_counts = ctx->dsp_thread_counts;
             ctx->n_threads = ctx->dsp_thread_counts;
+            ctx->dsp_thread_counts_max = ctx->dsp_thread_counts;
         }
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         if (0 != ggmlhexagon_init_rpcmempool(ctx)) {
@@ -4475,6 +4574,10 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
         return true;
     }
 
+    if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
+        return false;
+    }
+
     if (!ggmlhexagon_is_op_on_device(dev, op_tensor)) {
         return false;
     }
@@ -5322,7 +5425,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     };
 
     const uint64_t content_hash = compute_content_hash();
-    {
+    if (g_hexagon_appcfg.enable_graph_cache) {
         auto it = ctx->cgraph_cache.find(content_hash);
         if (it != ctx->cgraph_cache.end() &&
             it->second.n_nodes == cgraph->n_nodes &&
@@ -5333,6 +5436,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         } else {
             ctx->cgraph_cache_misses++;
         }
+    } else {
+        ctx->cgraph_cache_misses++;
     }
 
     // Bind to cached descriptors on hit, local vectors on miss. This avoids
@@ -5362,6 +5467,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
 
         if (supported_nodes.empty()) {
+            GGMLHEXAGON_LOG_ERROR("return result %d", result);
             return result;
         }
 
@@ -5490,12 +5596,26 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     //   HMX-eligible MUL_MATs are excluded: fusion redirects to HVX fused
     //   kernels, while HMX-eligible ops benefit more from the HMX pipeline.
     if (!cache_hit) {
-        // Count src usages of each tensor; fusable intermediates must have exactly one consumer
+        // Count src usages of each tensor from the FULL compute graph.
+        // Fusable intermediates must have exactly one consumer in the entire
+        // graph (not just DSP ops), otherwise fusion would break other consumers.
+        // Mirrors Qualcomm's ggml_node_has_n_uses() which scans the full cgraph.
         std::vector<int> src_use_count(n_tensors, 0);
-        for (const auto & op : hex_ops) {
-            for (int k = 0; k < HTP_OP_MAX_INPUTS; k++) {
-                if (op.src_idx[k] >= 0 && op.src_idx[k] < (int)n_tensors) {
-                    src_use_count[op.src_idx[k]]++;
+        {
+            std::unordered_map<const ggml_tensor *, int32_t> ptr_to_idx;
+            ptr_to_idx.reserve(n_tensors);
+            for (uint32_t i = 0; i < n_tensors; i++) {
+                ptr_to_idx[tensor_src[i]] = (int32_t)i;
+            }
+            for (int ni = 0; ni < cgraph->n_nodes; ni++) {
+                const ggml_tensor * node = cgraph->nodes[ni];
+                for (int s = 0; s < GGML_MAX_SRC; s++) {
+                    if (node->src[s]) {
+                        auto it = ptr_to_idx.find(node->src[s]);
+                        if (it != ptr_to_idx.end()) {
+                            src_use_count[it->second]++;
+                        }
+                    }
                 }
             }
         }
@@ -5515,12 +5635,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         //   - dispatches via NPU execute_op, which provides
         //     op_matmul_nx as dedicated fused kernel (htp/matmul-ops.c).
         // htp_arch>=V73 is required because op_matmul_nx uses HMX instructions.
-        bool qkv_ffn_enabled = (ctx->socinfo.htp_arch >= V73 && g_hexagon_appcfg.enable_opfusion);
+        bool qkv_ffn_enabled = (ctx->socinfo.htp_arch >= V73 && is_opfusion_enabled(OPFUSE_QKV_FFN_NX));
         for (size_t i = 0; i < hex_ops.size(); i++) {
             hex_op_desc op = hex_ops[i];
 
             // RMS_NORM + MUL -> RMS_NORM_MUL
-            if (op.opcode == GGML_OP_RMS_NORM && i + 1 < hex_ops.size()) {
+            if (is_opfusion_enabled(OPFUSE_RMS_NORM_MUL) && op.opcode == GGML_OP_RMS_NORM && i + 1 < hex_ops.size()) {
                 const hex_op_desc & next = hex_ops[i + 1];
                 if (next.opcode == GGML_OP_MUL &&
                     next.src_idx[0] == op.dst_idx[0] &&
@@ -5685,12 +5805,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             // is immediately followed by residual ADD. Gemma uses post-norm
             // (MUL_MAT -> RMS_NORM -> MUL -> ADD), so this won't trigger there.
             //
-            // Bias (src2) is read from DDR, not VTCM, so the kparams from
-            // Phase 2 (MUL_MAT) are reusable. The VTCM budget check is
-            // defensive: if the matmul already saturates VTCM as a plain
-            // MUL_MAT, fusing into MUL_MAT_ADD cannot save anything; better
-            // to keep it as 2 separate ops than risk silent overflow.
-            if (op.opcode == GGML_OP_MUL_MAT && i + 1 < hex_ops.size()) {
+            // Gate: only fuse for HMX-eligible or single-row (decode).
+            // Multi-row HVX matmuls benefit less from fusing the bias add
+            // and the VTCM layout would need to accommodate src2.
+            if (is_opfusion_enabled(OPFUSE_MUL_MAT_ADD) && op.opcode == GGML_OP_MUL_MAT && i + 1 < hex_ops.size()) {
                 const hex_op_desc & next = hex_ops[i + 1];
                 if (next.opcode == GGML_OP_ADD &&
                     (next.src_idx[0] == op.dst_idx[0] || next.src_idx[1] == op.dst_idx[0])) {
@@ -5706,19 +5824,55 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                         if (bias_idx >= 0) {
                             const struct htp_mm_kernel_params * kparams_mm =
                                 (const struct htp_mm_kernel_params *) op.kernel_params;
-                            if ((size_t) kparams_mm->vtcm_size <= vtcm_budget) {
-                                op.htp_opcode = HTP_OP_MUL_MAT_ADD;
-                                op.src_idx[2]   = bias_idx;
-                                op.dst_idx[0]    = next.dst_idx[0];
-                                fused_ops.push_back(op);
-                                i++;
-                                n_mul_mat_add++;
-                                ctx->n_fused_mm_add_cum++;
-                                continue;
+
+                            const ggml_tensor * src1 = tensor_src[op.src_idx[1]];
+                            const int src1_nrows = src1->ne[1] * src1->ne[2] * src1->ne[3];
+                            bool can_fuse = (kparams_mm->n_hmx > 0) || (src1_nrows == 1);
+                            // HVX VTCM kernels add the bias slice at vtcm_src2 + start_row
+                            // with 128B-aligned loads: rows per thread must be a multiple of 32
+                            if (can_fuse && kparams_mm->n_hmx == 0 &&
+                                (kparams_mm->kernel_type == HTP_MM_KERNEL_HVX_F16_F16_VTCM ||
+                                 kparams_mm->kernel_type == HTP_MM_KERNEL_HVX_F32_F32_VTCM)) {
+                                const ggml_tensor * w = tensor_src[op.src_idx[0]];
+                                const uint32_t nrows_total = (uint32_t)(w->ne[1] * w->ne[2] * w->ne[3]);
+                                const uint32_t nth = (uint32_t)ctx->n_threads;
+                                uint32_t rpt = (nrows_total + nth - 1) / nth;
+                                rpt += (rpt & 1);
+                                if (rpt % 32 != 0) {
+                                    can_fuse = false;
+                                    GGMLHEXAGON_LOG_INFO("skip MUL_MAT_ADD fusion: rows/thread %u not 32-aligned (nth=%u), bias slice would be misaligned", rpt, nth);
+                                }
+                            }
+                            if (!can_fuse) {
+                                GGMLHEXAGON_LOG_DEBUG("[AP-FUSE-MM_ADD-SKIP-CANFUSE] src0='%s' src1='%s' "
+                                    "n_hmx=%u src1_nrows=%d kernel_type=%d",
+                                    tensor_src[op.src_idx[0]]->name,
+                                    tensor_src[op.src_idx[1]]->name,
+                                    kparams_mm->n_hmx, src1_nrows, kparams_mm->kernel_type);
+                                n_mm_add_skip_use_count++;
                             } else {
-                                GGMLHEXAGON_LOG_INFO("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
-                                                      (int) kparams_mm->vtcm_size, vtcm_budget);
-                                n_mm_add_skip_vtcm++;
+                                // Keep Phase 2 kparams as-is: the DSP-side kernel builds its
+                                // own VTCM layout (including the fused bias slice) and only
+                                // uses kparams->vtcm_size for the reservation check. Rebuilding
+                                // the layout on the AP side regressed Llama-3.2-1B: the rebuilt
+                                // total adds the bias slice on top of an exactly-fitting Phase 2
+                                // total (8388608), the budget check then skipped the fusion, and
+                                // the already-overwritten kparams shipped with the unfused op,
+                                // which the DSP rejected with VTCM_TOO_SMALL (0x80000401).
+                                if ((size_t) kparams_mm->vtcm_size <= vtcm_budget) {
+                                    op.htp_opcode = HTP_OP_MUL_MAT_ADD;
+                                    op.src_idx[2]   = bias_idx;
+                                    op.dst_idx[0]    = next.dst_idx[0];
+                                    fused_ops.push_back(op);
+                                    i++;
+                                    n_mul_mat_add++;
+                                    ctx->n_fused_mm_add_cum++;
+                                    continue;
+                                } else {
+                                    GGMLHEXAGON_LOG_INFO("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
+                                                           (int) kparams_mm->vtcm_size, vtcm_budget);
+                                    n_mm_add_skip_vtcm++;
+                                }
                             }
                         }
                     }
@@ -6172,7 +6326,26 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     int64_t t_p9_post = ggml_time_us();
 
     if (AEE_SUCCESS != hexagon_error) {
-        GGMLHEXAGON_LOG_WARN("ggml_htp_execute_batch failed: 0x%x", hexagon_error);
+        GGMLHEXAGON_LOG_ERROR("ggml_htp_execute_batch failed: 0x%x", hexagon_error);
+        // Dump every op of the failed batch: opcode, src/dst tensor indices,
+        // and for MUL_MAT the key kernel params (kernel_type, n_threads, n_hmx,
+        // vtcm carve-out) so fused vs unfused layouts can be compared.
+        for (size_t i = 0; i < hex_ops.size(); i++) {
+            const hex_op_desc & o = hex_ops[i];
+            if (o.opcode == GGML_OP_MUL_MAT) {
+                GGMLHEXAGON_LOG_INFO("failed-batch op[%zu/%zu] %s htp_op=%d src=[%d,%d,%d] dst=%d "
+                                     "ktype=%d nth=%d n_hmx=%d vtcm=%d (s0=%d s1=%d s2=%d s3=%d d=%d)",
+                                     i, hex_ops.size(), ggml_op_name((ggml_op)o.opcode), o.htp_opcode,
+                                     o.src_idx[0], o.src_idx[1], o.src_idx[2], o.dst_idx[0],
+                                     o.kernel_params[0], o.kernel_params[4], o.kernel_params[6],
+                                     o.kernel_params[11], o.kernel_params[12], o.kernel_params[13],
+                                     o.kernel_params[14], o.kernel_params[15], o.kernel_params[16]);
+            } else {
+                GGMLHEXAGON_LOG_INFO("failed-batch op[%zu/%zu] %s htp_op=%d src=[%d,%d,%d] dst=%d",
+                                     i, hex_ops.size(), ggml_op_name((ggml_op)o.opcode), o.htp_opcode,
+                                     o.src_idx[0], o.src_idx[1], o.src_idx[2], o.dst_idx[0]);
+            }
+        }
         result =  GGML_STATUS_FAILED;
     }
 
@@ -6715,17 +6888,38 @@ static void ggml_backend_hexagon_set_n_threads(ggml_backend_t backend, int n_thr
     GGML_ASSERT(ggml_backend_is_hexagon(backend));
 
     struct ggml_backend_hexagon_context * ctx = (struct ggml_backend_hexagon_context *)backend->context;
-    // Prefer NPU-reported cap (set in ggmlhexagon_init_dsp via setclocks
-    // out param, equals max_hw_threads - 2). Fall back to cfg value if
-    // set_n_threads is called before NPU init completes.
-    const int cap = (ctx->dsp_thread_counts > 0) ? ctx->dsp_thread_counts : g_hexagon_appcfg.thread_counts;
+    // Safe cap reported by the NPU at init (max_hw_threads - 2). Fall back to
+    // cfg value if set_n_threads is called before NPU init completes.
+    const int cap = (ctx->dsp_thread_counts_max > 0) ? ctx->dsp_thread_counts_max : g_hexagon_appcfg.thread_counts;
     int new_threads = (n_threads < cap) ? n_threads : cap;
     if (new_threads != ctx->n_threads) {
-        ctx->n_threads = new_threads;
-        // VTCM partitioning depends on thread count. Cached mm params and cached
-        // graph descriptors both embed it, so drop both.
-        ctx->mm_params_cache.clear();
-        ctx->cgraph_cache.clear();
+        // The DSP partitions work (per-thread VTCM slices, row ranges) with its
+        // own worker count, while kparams (VTCM layout, fusion eligibility)
+        // are precomputed on AP with ctx->n_threads. The two must match:
+        // a mismatch left the fused MUL_MAT+ADD bias slice misaligned on DSP
+        // while AP considered it aligned. setclocks re-creates the DSP work
+        // queue and is safe to re-call between graph computes.
+        if (ctx->ggmlop_handle && ctx->dsp_thread_counts > 0 && new_threads != ctx->dsp_thread_counts) {
+            int32_t actual = 0;
+            int rc = ggml_htp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, new_threads, &actual);
+            if (AEE_SUCCESS == rc && actual > 0) {
+                ctx->dsp_thread_counts = actual;
+                g_hexagon_appcfg.thread_counts = actual;
+                new_threads = actual;
+                GGMLHEXAGON_LOG_INFO("set_n_threads: DSP worker count synced to %d", actual);
+            } else {
+                GGMLHEXAGON_LOG_WARN("set_n_threads: DSP sync failed (0x%x), keeping AP threads at DSP value %d",
+                                     rc, ctx->dsp_thread_counts);
+                new_threads = ctx->dsp_thread_counts;
+            }
+        }
+        if (new_threads != ctx->n_threads) {
+            ctx->n_threads = new_threads;
+            // VTCM partitioning depends on thread count. Cached mm params and cached
+            // graph descriptors both embed it, so drop both.
+            ctx->mm_params_cache.clear();
+            ctx->cgraph_cache.clear();
+        }
     }
 }
 

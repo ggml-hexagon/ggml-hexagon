@@ -123,7 +123,7 @@ PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know ma
 #verified and test on 8Gen4 & 8Gen3
 #running_params=" --device HTP0 --cpu-mask 0xfc --cpu-strict 1 -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 #--device HTP0 is not mandatory for pure HTP tests, so these running_params can be used for dspqueue-based ggml-hexagon, fastrpc-based ggml-hexagon, cpu-only
-running_params=" --cpu-mask 0xfc --cpu-strict 1 -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 
 ######## part-3: utilities and functions ########
 
@@ -647,7 +647,7 @@ function check_prebuilt_models()
     set +e
 
     #1.12 GiB
-    check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
+    #check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
     #1.2 GiB
     check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
@@ -674,13 +674,13 @@ function check_prebuilt_models()
     #check_and_download_model MiniCPM5-1B-Q8_0.gguf               https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q8_0.gguf
 
     #635 MiB
-    check_and_download_model minicpm5-1b-q4_0.gguf               https://huggingface.co/Elmermoreno/MiniCPM5-1B-Q4_0-GGUF/resolve/main/minicpm5-1b-q4_0.gguf
+    #check_and_download_model minicpm5-1b-q4_0.gguf               https://huggingface.co/Elmermoreno/MiniCPM5-1B-Q4_0-GGUF/resolve/main/minicpm5-1b-q4_0.gguf
 
     #3.2 GiB
-    #check_and_download_model Spark-X2.5-1.7B.gguf               https://huggingface.co/XHToken/Spark-X2.5-1.7B-GGUF/resolve/main/Spark-X2.5-1.7B.gguf
+    check_and_download_model Spark-X2.5-1.7B.gguf               https://huggingface.co/XHToken/Spark-X2.5-1.7B-GGUF/resolve/main/Spark-X2.5-1.7B.gguf
 
     #7.7 GiB
-    #check_and_download_model Spark-X2.5-4B.gguf                  https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B.gguf
+    check_and_download_model Spark-X2.5-4B.gguf                  https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B.gguf
 
     #4.57 GiB
     #check_and_download_model Marco-Nano-Instruct.Q4_0.gguf        https://huggingface.co/gat45/snapdragon-test-npu/resolve/main/Marco-Nano-Instruct.Q4_0.gguf
@@ -1023,8 +1023,6 @@ function prepare_run_on_phone()
     adb shell "rm -f /data/local/tmp/${program}.farf"
     adb shell "touch /data/local/tmp/${program}.farf"
     adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
-    #observe cDSP's log
-    #adb logcat  | grep "CDSP0"
 }
 
 
@@ -1048,7 +1046,7 @@ function run_llamacli()
         model_name="$1"
         model_path=$(resolve_model_name "$model_name")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3, spark-1b, spark-4b"
             exit 1
         fi
     else
@@ -1128,7 +1126,7 @@ function run_llamabench()
         model_name="$1"
         model_path=$(resolve_model_name "$model_name")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: llama3, qwen3-2b, gemma4-e2b, nanbeige-3b, gemma4-e4b, qwen3-9b, spark-1b, spark-4b"
             exit 1
         fi
     else
@@ -1152,7 +1150,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("qwen1" "minicpm5-1b" "llama3" "qwen3-2b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b")
+    local models=("qwen1" "minicpm5-1b" "llama3" "qwen3-2b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "spark-1b" "spark-4b")
 
     local total=${#models[@]}
     local count=0
@@ -1229,7 +1227,7 @@ function run_abtest()
         local model_alias="$2"
         model_path=$(resolve_model_name "$model_alias")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_alias'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_alias'. Valid aliases: llama3, qwen3-2b, gemma4-e2b, nanbeige-3b, gemma4-e4b, qwen3-9b, spark-1b, spark-4b"
             exit 1
         fi
     fi
@@ -1395,7 +1393,7 @@ function run_abtest_all()
     fi
 
     #local all_models="qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
-    local all_models="gemma4-e2b gemma4-e4b qwen3-2b nanbeige-3b qwen1 minicpm5-1b llama3 qwen3-9b"
+    local all_models="gemma4-e2b gemma4-e4b qwen3-2b nanbeige-3b llama3 qwen3-9b spark-1b spark-4b"
     local total=8
     local idx=0
 
@@ -1668,7 +1666,7 @@ function show_usage()
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 8 models (qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
+    echo "    Batch AB test across all 8 models (gemma4-e2b gemma4-e4b qwen3-2b nanbeige-3b llama3 qwen3-9b spark-1b spark-4b)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1694,7 +1692,8 @@ function show_usage()
     echo "    $0 run_llamacli/run_llamabench              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
     echo "    $0 run_llamacli/run_llamabench qwen3-2b     # test qwen3-2b"
     echo "    $0 run_llamacli/run_llamabench gemma4-e2b   # test gemma4-e2b"
-    echo "    $0 run_llamacli/run_llamabench gemma4-e4b   # test gemma4-e4b (mirror stress test)"
+    echo "    $0 run_llamacli/run_llamabench gemma4-e4b   # test gemma4-e4b"
+    echo "    $0 run_llamacli/run_llamabench spark-1b     # test spark-1b"
 }
 
 
