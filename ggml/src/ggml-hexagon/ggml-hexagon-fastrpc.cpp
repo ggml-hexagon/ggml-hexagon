@@ -576,7 +576,6 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
 
     GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version:             %s", g_hexagon_appcfg.version);
     ggmlhexagon_get_timestring(timestamp);
-    GGMLHEXAGON_LOG_VERBOSE("initial thread_counts on HTP:     %d (runtime -t takes effect at first graph compute)", g_hexagon_appcfg.thread_counts);
     GGMLHEXAGON_LOG_VERBOSE("rpc_mmap_mode:                    %d", g_hexagon_appcfg.rpc_mmap_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
     GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit0:              %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
@@ -584,6 +583,8 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(NPU):              %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(AP):               %d", g_hexagon_appcfg.dump_debug_info);
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
+    GGMLHEXAGON_LOG_VERBOSE("enable graph_cache:               %d", g_hexagon_appcfg.enable_graph_cache);
+    GGMLHEXAGON_LOG_VERBOSE("initial thread_counts on NPU:     %d (runtime -t takes effect at first graph compute)", g_hexagon_appcfg.thread_counts);
     // 0 = all off, 1 = all on (backward compat), >= 2 = bitmask selective
     if (g_hexagon_appcfg.enable_opfusion <= 0) {
         GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d (all fusions disabled)", g_hexagon_appcfg.enable_opfusion);
@@ -592,7 +593,6 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     } else {
         GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d (bitmask: 0x1=RMS_NORM_MUL 0x2=QKV_FFN_NX 0x4=MUL_MAT_ADD)", g_hexagon_appcfg.enable_opfusion);
     }
-    GGMLHEXAGON_LOG_VERBOSE("enable graph_cache:               %d", g_hexagon_appcfg.enable_graph_cache);
     GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
 }
@@ -3029,6 +3029,8 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
         case GGML_OP_L2_NORM: *htp_op = HTP_OP_L2_NORM;     return true;
         case GGML_OP_RMS_NORM:*htp_op = HTP_OP_RMS_NORM;    return true;
         case GGML_OP_SCALE:   *htp_op = HTP_OP_SCALE;       return true;
+        case GGML_OP_CLAMP:   *htp_op = HTP_OP_CLAMP;       return true;
+        case GGML_OP_LEAKY_RELU:   *htp_op = HTP_OP_LEAKY_RELU;       return true;
         case GGML_OP_SQR:     *htp_op = HTP_OP_SQR;         return true;
         case GGML_OP_SQRT:    *htp_op = HTP_OP_SQRT;        return true;
         case GGML_OP_LOG:     *htp_op = HTP_OP_UNARY_LOG;   return true;
@@ -3042,6 +3044,7 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
                 case GGML_UNARY_OP_EXP:        *htp_op = HTP_OP_UNARY_EXP;      return true;
                 case GGML_UNARY_OP_SOFTPLUS:   *htp_op = HTP_OP_UNARY_SOFTPLUS; return true;
                 case GGML_UNARY_OP_ABS:        *htp_op = HTP_OP_UNARY_ABS;      return true;
+                case GGML_UNARY_OP_RELU:       *htp_op = HTP_OP_UNARY_RELU;     return true;
                 case GGML_UNARY_OP_SILU:       *htp_op = HTP_OP_UNARY_SILU;     return true;
                 case GGML_UNARY_OP_GELU:
                 case GGML_UNARY_OP_GELU_QUICK: *htp_op = HTP_OP_UNARY_GELU;     return true;
@@ -3230,6 +3233,12 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
     const int wtype = ggml_hexagon_weight_dsp_type(src0->type);
 
     if (ne01_padded % 32 != 0) {
+        return false;
+    }
+
+    // HMX kernel requires raw src0->ne[1] to be 32-aligned
+    // (ne01_padded is always 32-aligned for repack types, so it alone is insufficient)
+    if (src0->ne[1] % 32 != 0) {
         return false;
     }
 
@@ -4059,7 +4068,8 @@ static bool ggmlhexagon_supported_flash_attn(
         return false;
     }
     if ((q->type != GGML_TYPE_F16 && q->type != GGML_TYPE_F32) ||
-        k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16) {
+        (k->type != GGML_TYPE_F16 && k->type != GGML_TYPE_Q8_0) ||
+        (v->type != GGML_TYPE_F16 && v->type != GGML_TYPE_Q8_0)) {
         return false;
     }
     if (mask && mask->type != GGML_TYPE_F16) {
@@ -4128,22 +4138,57 @@ static bool hexagon_validate_rms_norm(ggml_backend_hexagon_context * ctx, const 
     return true;
 }
 
-// NORM, L2_NORM: dispatched to op_unary (F32, same shape, contiguous dst)
-static bool hexagon_validate_norm_op(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
+// Common validator for unary-family ops (NORM, L2_NORM, SCALE, CLAMP,
+// LEAKY_RELU, SQR, SQRT, LOG, ...).  Mirrors ggml_hexagon_supported_unary()
+// in ggml-hexagon.cpp: F32/F16, same shape, contiguous dst.
+static bool ggml_hexagon_supported_unary(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
-    if ((src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) || src0->type != op->type)
-        return false;
-    if (!ggml_are_same_shape(src0, op))
-        return false;
-    if (!ggml_is_contiguous(op))
-        return false;
-    return true;
-}
+    const ggml_tensor * dst  = op;
 
-// SQR, SQRT: element-wise unary, same as norm_op
-static bool hexagon_validate_sqr_sqrt(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
-    return hexagon_validate_norm_op(ctx, op);
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) {
+        return false;
+    }
+    if (dst->type != src0->type) {
+        return false;
+    }
+    if (!ggml_is_contiguous_rows(src0)) {
+        return false;
+    }
+
+    // F16 device kernels only cover this explicit whitelist (must stay in sync with
+    // the is_f16 whitelist in execute_op_unary(), unary-ops.c).
+    if (src0->type == GGML_TYPE_F16) {
+        switch (op->op) {
+            case GGML_OP_NORM:
+            case GGML_OP_RMS_NORM:
+            case GGML_OP_L2_NORM:
+            case GGML_OP_SCALE:
+            case GGML_OP_CLAMP:
+            case GGML_OP_SQR:
+            case GGML_OP_SQRT:
+            case GGML_OP_LOG:
+                break;
+            case GGML_OP_UNARY:
+                if (ggml_get_unary_op(op) != GGML_UNARY_OP_ABS) {
+                    return false;
+                }
+                break;
+            default:
+                return false;
+        }
+    }
+
+    if (!ggml_are_same_shape(src0, dst)) {
+        return false;
+    }
+
+    // dst must be contiguous; src0 may be non-contiguous
+    if (!ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    return true;
 }
 
 static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
@@ -4168,10 +4213,46 @@ static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml
 
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
-    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+    const ggml_tensor * src2 = op->src[2];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32) {
         return false;
-    if (!src1 || src1->type != GGML_TYPE_I32)
+    }
+    if (dst->type != GGML_TYPE_F32) {
         return false;
+    }
+    if (src1->type != GGML_TYPE_I32) {
+        return false;
+    }
+    if (src2) {
+        if (src2->type != GGML_TYPE_F32) {
+            return false;
+        }
+        int n_dims = op_params[1];
+        if (src2->ne[0] < (n_dims / 2)) {
+            return false;
+        }
+    }
+
+    if (src2) {
+        if (!ggml_is_contiguous(src1) || !ggml_is_contiguous(src2)) {
+            return false;
+        }
+    } else {
+        if (!ggml_is_contiguous(src1)) {
+            return false;
+        }
+    }
+
+    // src0/dst elements within a row must be contiguous (nb[0] == sizeof(float)).
+    // nb[1] may exceed ne[0]*sizeof(float) when the tensor is a strided view of a larger one
+    if (src0->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
+        return false;
+    }
+    if (src0->nb[1] < src0->ne[0] * sizeof(float) || dst->nb[1] < dst->ne[0] * sizeof(float)) {
+        return false;
+    }
     return true;
 }
 
@@ -4179,61 +4260,90 @@ static bool hexagon_validate_soft_max(ggml_backend_hexagon_context * ctx, const 
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
-    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
-        return false;
-    if (src1 != nullptr && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_F32)
-        return false;
-    if (op->src[2] != nullptr)
-        return false;
-    return true;
-}
+    const ggml_tensor * src2 = op->src[2];
+    const ggml_tensor * dst  = op;
 
-static bool hexagon_validate_unary(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
-    GGML_UNUSED(ctx);
-    const ggml_tensor * src0 = op->src[0];
-    const int unary_op = (int)op->op_params[0];
-    switch (unary_op) {
-        case GGML_UNARY_OP_ABS:
-            if ((src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) || src0->type != op->type)
-                return false;
-            if (!ggml_are_same_shape(src0, op))
-                return false;
-            if (!ggml_is_contiguous(op))
-                return false;
-            return true;
-        case GGML_UNARY_OP_SILU:
-        case GGML_UNARY_OP_GELU:
-        case GGML_UNARY_OP_GELU_QUICK:
-        case GGML_UNARY_OP_NEG:
-        case GGML_UNARY_OP_EXP:
-        case GGML_UNARY_OP_SIGMOID:
-        case GGML_UNARY_OP_SOFTPLUS:
-        case GGML_UNARY_OP_TANH:
-            if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
-                return false;
-            if (ggml_is_permuted(src0))
-                return false;
-            if (!ggml_are_same_shape(src0, op))
-                return false;
-            if (!ggml_is_contiguous(op))
-                return false;
-            return true;
-        default:
-            return false;
+    if (src2) {
+        return false;  // FIXME: add support for sinks
     }
+
+    if (src0->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (src1) {
+        if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16) {
+            return false;
+        }
+        if (src0->ne[0] != src1->ne[0]) {
+            return false;
+        }
+        if (src1->ne[1] < src0->ne[1]) {
+            return false;
+        }
+        if (src0->ne[2] % src1->ne[2] != 0) {
+            return false;
+        }
+        if (src0->ne[3] % src1->ne[3] != 0) {
+            return false;
+        }
+    }
+
+    if (src1) {
+        if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+            return false;
+        }
+    } else {
+        if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst)) {
+            return false;
+        }
+    }
+
+    // Reject non-HVX-aligned sizes when ne[0] > HVX_F32_LANES
+    const int64_t ne0 = src0->ne[0];
+    if (ne0 > 32 && (ne0 & (32 - 1)) != 0) {
+        return false;
+    }
+
+    #define SOFTMAX_MAX_ROW_SIZE 131072
+    if (ne0 > SOFTMAX_MAX_ROW_SIZE) {
+        return false;
+    }
+
+    return true;
 }
 
 static bool hexagon_validate_glu(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
-    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+    const ggml_tensor * src1 = op->src[1];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
         return false;
-    if (!ggml_is_contiguous_1(src0) || !ggml_is_contiguous(op))
+    if (!ggml_is_contiguous_1(src0) || !ggml_is_contiguous(dst))
         return false;
+
+    if (src1) {
+        if (src1->type != GGML_TYPE_F32) {
+            return false;
+        }
+        if (!ggml_are_same_shape(src0, src1)) {
+            return false;
+        }
+        if (!ggml_is_contiguous_1(src1)) {
+            return false;
+        }
+    }
+
     const int glu_op = (int)op->op_params[0];
     switch (glu_op) {
         case GGML_GLU_OP_SWIGLU:
         case GGML_GLU_OP_SWIGLU_OAI:
+        case GGML_GLU_OP_SWIGLU_CLAMP:
         case GGML_GLU_OP_GEGLU:
             return true;
         default:
@@ -4241,22 +4351,25 @@ static bool hexagon_validate_glu(ggml_backend_hexagon_context * ctx, const ggml_
     }
 }
 
-static bool hexagon_validate_scale(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
-    GGML_UNUSED(ctx);
-    const ggml_tensor * src0 = op->src[0];
-    if (src0->type != op->type) return false;
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
-        return false;
-    return true;
-}
-
 static bool hexagon_validate_cpy(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
-    if (src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32)
-        return false;
-    if (op->type != GGML_TYPE_F16 && op->type != GGML_TYPE_F32)
-        return false;
+    const ggml_tensor * dst  = op;
+
+    // for now we can do f32 -> f16 and f16 -> f32 (without reshaping)
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) return false;
+    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16) return false;
+
+    const bool sametype   = (src0->type == dst->type);
+    const bool transposed = ggml_is_transposed(src0) || ggml_is_transposed(dst);
+    const bool sameshape  = !transposed && ggml_are_same_shape(src0, dst);
+
+    // can handle any shape and any same-type (pretty slow if reshaping is required)
+    if (sametype) return true;
+
+    // cannot handle re-shaping and type conversion at the same time
+    if (!sameshape) return false;
+
     return true;
 }
 
@@ -4264,10 +4377,29 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const 
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
-    if (!src1 || src1->type != GGML_TYPE_I32)
+    const ggml_tensor * dst  = op;
+
+    // Reject repacked tensors – tiled layout is not suitable for row-indexed access
+    if (src0->buffer && ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
         return false;
-    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+    }
+
+    if (src0->type != GGML_TYPE_F32 && src0->ne[0] < 32) {
         return false;
+    }
+
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_Q8_0) {
+        return false;
+    }
+
+    if (src1->type != GGML_TYPE_I32 && src1->type != GGML_TYPE_I64) {
+        return false;
+    }
+
+    if (dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
     return true;
 }
 
@@ -4275,39 +4407,66 @@ static bool hexagon_validate_set_rows(ggml_backend_hexagon_context * ctx, const 
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
-    if (!src1 || (src1->type != GGML_TYPE_I32 && src1->type != GGML_TYPE_I64))
+    const ggml_tensor * dst  = op->src[2] ? op->src[2] : op;
+
+    if (dst->type == GGML_TYPE_Q8_0 && src0->ne[0] < 32) {
         return false;
+    }
+
     if (src0->type != GGML_TYPE_F32)
         return false;
-    if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16)
+
+    if (!src1 || (src1->type != GGML_TYPE_I32 && src1->type != GGML_TYPE_I64))
         return false;
+
+    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_Q8_0)
+        return false;
+
     return true;
 }
 
 static bool hexagon_validate_sum_rows(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    if (op->src[0]->type != GGML_TYPE_F32)
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32)
         return false;
+    if (dst->type != GGML_TYPE_F32)
+        return false;
+
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst))
+        return false;
+
     return true;
 }
 
 static bool hexagon_validate_cont(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
+    // CONT is same-type only, supports f32 and f16
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
-        return false;
-    if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16)
         return false;
     return true;
 }
 
 static bool hexagon_validate_concat(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor * src0 = op->src[0];
-    if (src0->type != op->type) return false;
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
-        src0->type != GGML_TYPE_I32 && src0->type != GGML_TYPE_I16)
+    int dim = ((const int32_t *) op->op_params)[0];
+    if (dim < 0 || dim >= GGML_MAX_DIMS) {
         return false;
+    }
+
+    for (int i = 0; i < GGML_MAX_SRC; ++i) {
+        const ggml_tensor * src = op->src[i];
+        if (!src) {
+            continue;
+        }
+        if (src->type != GGML_TYPE_F32 && src->type != GGML_TYPE_I32 && src->type != GGML_TYPE_F16) {
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -4342,29 +4501,62 @@ static bool hexagon_validate_diag_mask_inf(ggml_backend_hexagon_context * ctx, c
 
 static bool hexagon_validate_cumsum(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
         return false;
+
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst))
+        return false;
+
     return true;
 }
 
 static bool hexagon_validate_diag(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
         return false;
+
+    // Input must have ne[1] == 1 (vector input)
+    if (src0->ne[1] != 1)
+        return false;
+
+    // Output must be square in first two dimensions
+    if (dst->ne[0] != dst->ne[1] || dst->ne[0] != src0->ne[0])
+        return false;
+
     return true;
 }
 
 static bool hexagon_validate_argsort(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    if (op->src[0]->type != GGML_TYPE_F32)
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32)
         return false;
+
+    if (dst->type != GGML_TYPE_I32)
+        return false;
+
+    if (src0->ne[0] > (16 * 1024))
+        return false;
+
     return true;
 }
 
 static bool hexagon_validate_pad(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    if (op->src[0]->type != GGML_TYPE_F32)
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
         return false;
+
     return true;
 }
 
@@ -4453,8 +4645,14 @@ static bool hexagon_validate_solve_tri(ggml_backend_hexagon_context * ctx, const
 
 static bool hexagon_validate_tri(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    if (op->src[0]->type != GGML_TYPE_F32)
-        return false;
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32) return false;
+    if (dst->type  != GGML_TYPE_F32) return false;
+    if (!ggml_are_same_shape(src0, dst)) return false;
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst)) return false;
+
     return true;
 }
 
@@ -4536,18 +4734,31 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_SUB]            = hexagon_validate_binary_op;
     s_op_validators[GGML_OP_MUL]            = hexagon_validate_binary_op;
     s_op_validators[GGML_OP_DIV]            = hexagon_validate_binary_op;
+
     s_op_validators[GGML_OP_MUL_MAT]        = hexagon_validate_mul_mat;
+
+    // unary-family: NORM, L2_NORM, RMS_NORM, SCALE, CLAMP, LEAKY_RELU
+    // (mirrors the ggml_backend_hexagon_device_supports_op grouping)
+    s_op_validators[GGML_OP_NORM]           = ggml_hexagon_supported_unary;
+    s_op_validators[GGML_OP_L2_NORM]        = ggml_hexagon_supported_unary;
+    // RMS_NORM: stricter than ggml_hexagon_supported_unary – F32 only,
+    // accepts non-contiguous views (Qwen3Next per-head reshape).
     s_op_validators[GGML_OP_RMS_NORM]       = hexagon_validate_rms_norm;
-    s_op_validators[GGML_OP_NORM]           = hexagon_validate_norm_op;
-    s_op_validators[GGML_OP_L2_NORM]        = hexagon_validate_norm_op;
-    s_op_validators[GGML_OP_SQR]            = hexagon_validate_sqr_sqrt;
-    s_op_validators[GGML_OP_SQRT]           = hexagon_validate_sqr_sqrt;
-    s_op_validators[GGML_OP_LOG]            = hexagon_validate_sqr_sqrt;
+    s_op_validators[GGML_OP_SCALE]          = ggml_hexagon_supported_unary;
+    s_op_validators[GGML_OP_CLAMP]          = ggml_hexagon_supported_unary;
+    s_op_validators[GGML_OP_LEAKY_RELU]     = ggml_hexagon_supported_unary;
+
+    // unary-family: SQR, SQRT, LOG
+    s_op_validators[GGML_OP_SQR]            = ggml_hexagon_supported_unary;
+    s_op_validators[GGML_OP_SQRT]           = ggml_hexagon_supported_unary;
+    s_op_validators[GGML_OP_LOG]            = ggml_hexagon_supported_unary;
+
+    // GGML_OP_UNARY sub-ops (NEG, TANH, SIGMOID, EXP, SOFTPLUS, ABS, RELU, ...)
+    s_op_validators[GGML_OP_UNARY]          = ggml_hexagon_supported_unary;
+
     s_op_validators[GGML_OP_ROPE]           = hexagon_validate_rope;
     s_op_validators[GGML_OP_SOFT_MAX]       = hexagon_validate_soft_max;
-    s_op_validators[GGML_OP_UNARY]          = hexagon_validate_unary;
     s_op_validators[GGML_OP_GLU]            = hexagon_validate_glu;
-    s_op_validators[GGML_OP_SCALE]          = hexagon_validate_scale;
     s_op_validators[GGML_OP_CPY]            = hexagon_validate_cpy;
     s_op_validators[GGML_OP_GET_ROWS]       = hexagon_validate_get_rows;
     s_op_validators[GGML_OP_SET_ROWS]       = hexagon_validate_set_rows;
@@ -5467,7 +5678,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
 
         if (supported_nodes.empty()) {
-            GGMLHEXAGON_LOG_ERROR("return result %d", result);
+            GGMLHEXAGON_LOG_ALWAYS("return result %d", result);
             return result;
         }
 
