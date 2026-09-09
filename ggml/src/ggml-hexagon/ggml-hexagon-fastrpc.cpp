@@ -5381,8 +5381,7 @@ static size_t ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer
 static size_t ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
     GGML_ASSERT(nullptr != ctx);
-    GGML_ASSERT(ctx->rpc_mempool_len > (8 * SIZE_IN_MB));
-    return ctx->rpc_mempool_len - (8 * SIZE_IN_MB);
+    return ctx->rpc_mempool_len;
 }
 
 static size_t ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const struct ggml_tensor * tensor) {
