@@ -82,6 +82,7 @@
 #include "htp/unary-ops.h"
 #include "htp/get-rows-ops.h"
 #include "htp/set-rows-ops.h"
+#include "htp/rope-ops.h"
 #include "ggml_htp.h"
 #include "htp-drv.h"
 
@@ -3218,6 +3219,35 @@ static void ggml_hexagon_precompute_set_rows_params(
     kparams->vtcm_size = vtcm_layout.total_bytes;
 }
 
+static void ggml_hexagon_precompute_rope_params(
+    const ggml_backend_hexagon_context * ctx,
+    const ggml_tensor * node,
+    struct htp_rope_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    const ggml_tensor * src0 = node->src[0];
+
+    const uint32_t src0_nrows = src0->ne[1] * src0->ne[2] * src0->ne[3];
+    const uint32_t n_threads  = (std::min)((uint32_t) ctx->n_threads, src0_nrows);
+
+    struct htp_rope_vtcm_layout layout;
+    htp_rope_vtcm_layout_build(&layout, src0->ne[0], n_threads);
+
+    kparams->n_threads              = n_threads;
+    kparams->src0_nrows             = src0_nrows;
+    kparams->src0_nrows_per_thread  = (src0_nrows + n_threads - 1) / n_threads;
+    kparams->vtcm_size              = (uint32_t) layout.total_bytes;
+    kparams->spad_per_thread        = (uint32_t) layout.bytes_per_thread;
+    kparams->theta_cache_offset     = (uint32_t) layout.theta_cache_size_aligned;
+    kparams->src0_row_size_aligned  = (uint32_t) layout.src0_row_size_aligned;
+
+    if (src0_nrows > 0) {
+        kparams->div_ne2_ne1 = init_fastdiv_values(node->ne[2] * node->ne[1]);
+        kparams->div_ne1     = init_fastdiv_values(node->ne[1]);
+    }
+}
+
 static bool ggml_hexagon_matmul_is_hmx_eligible(
     const struct ggml_tensor * src0,
     const struct ggml_tensor * src1,
@@ -4192,55 +4222,82 @@ static bool ggml_hexagon_supported_unary(ggml_backend_hexagon_context * ctx, con
 }
 
 static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
-    GGML_UNUSED(ctx);
-    const int32_t * op_params = &op->op_params[0];
-
-    // ggml_rope_set_offset: HVX kernels need a VLEN-aligned window start (32 f32 elems)
-    if (op_params[15] % 32 != 0) {
-        return false;
-    }
-
-    int mode = op_params[2];
-    if (mode == GGML_ROPE_TYPE_VISION) {
-        const int n_dims = op_params[1];
-        if (n_dims != (int) (op->src[0]->ne[0] / 2)) {
-            return false;
-        }
-    }
-    if (mode & 1) {
-        return false;
-    }
-
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
     const ggml_tensor * src2 = op->src[2];
     const ggml_tensor * dst  = op;
 
-    if (src0->type != GGML_TYPE_F32) {
+    if (!ggml_are_same_shape(src0, dst)) {
         return false;
     }
-    if (dst->type != GGML_TYPE_F32) {
+
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_I32) {
         return false;
     }
-    if (src1->type != GGML_TYPE_I32) {
+
+    if (src0->ne[0] <= 0) {
         return false;
     }
-    if (src2) {
-        if (src2->type != GGML_TYPE_F32) {
-            return false;
-        }
-        int n_dims = op_params[1];
-        if (src2->ne[0] < (n_dims / 2)) {
+
+    const uint32_t src0_nrows = src0->ne[1] * src0->ne[2] * src0->ne[3];
+    if (src0_nrows == 0) {
+        return false;
+    }
+
+    const int32_t * op_params = &op->op_params[0];
+    const int n_dims = op_params[1];
+    const int mode   = op_params[2];
+    const int n_offs = op_params[15];
+
+    if (n_dims <= 0 || n_dims % 2 != 0) {
+        return false;
+    }
+
+    // ggml_rope_set_offset: HVX kernels need a VLEN-aligned window start (32 f32 elems)
+    if (n_offs < 0 || (n_offs % 32 != 0) || (n_offs + n_dims > src0->ne[0])) {
+        return false;
+    }
+
+    float freq_base;
+    memcpy(&freq_base, op_params + 5, sizeof(float));
+    if (freq_base <= 0.0f) {
+        return false;
+    }
+
+    if (mode != GGML_ROPE_TYPE_NORMAL &&
+        mode != GGML_ROPE_TYPE_NEOX &&
+        mode != GGML_ROPE_TYPE_MROPE &&
+        mode != GGML_ROPE_TYPE_VISION &&
+        mode != GGML_ROPE_TYPE_IMROPE) {
+        return false;
+    }
+
+    const bool is_mrope = (mode & GGML_ROPE_TYPE_MROPE) != 0;
+
+    // n_dims == ne0/2, so the rotation spans the full row
+    if (mode == GGML_ROPE_TYPE_VISION) {
+        if (n_dims != (int) (src0->ne[0] / 2) || n_offs != 0) {
             return false;
         }
     }
 
-    if (src2) {
-        if (!ggml_is_contiguous(src1) || !ggml_is_contiguous(src2)) {
+    if (is_mrope) {
+        const int32_t * sections = op_params + 11;
+        if (sections[0] <= 0 && sections[1] <= 0 && sections[2] <= 0) {
             return false;
         }
-    } else {
-        if (!ggml_is_contiguous(src1)) {
+    }
+
+    const int64_t min_pos_len = (is_mrope || mode == GGML_ROPE_TYPE_VISION) ? src0->ne[2] * 4 : src0->ne[2];
+    if (src1->ne[0] < min_pos_len || !ggml_is_contiguous(src1)) {
+        return false;
+    }
+
+    if (src2) {
+        if (src2->type != GGML_TYPE_F32 || !ggml_is_contiguous(src2)) {
+            return false;
+        }
+        if (src2->ne[0] < (n_dims / 2)) {
             return false;
         }
     }
@@ -4253,6 +4310,16 @@ static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml
     if (src0->nb[1] < src0->ne[0] * sizeof(float) || dst->nb[1] < dst->ne[0] * sizeof(float)) {
         return false;
     }
+
+    const uint32_t n_threads = (std::min)((uint32_t) ctx->n_threads, src0_nrows);
+    const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024ull * 1024ull;
+
+    struct htp_rope_vtcm_layout layout;
+    htp_rope_vtcm_layout_build(&layout, src0->ne[0], n_threads);
+    if (layout.total_bytes > vtcm_budget) {
+        return false;
+    }
+
     return true;
 }
 
@@ -5737,6 +5804,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     ggml_hexagon_precompute_set_rows_params(ctx,
                         node->src[0], node->src[1], node,
                         (struct htp_set_rows_kernel_params *) op.kernel_params);
+                } else if (node->op == GGML_OP_ROPE) {
+                    ggml_hexagon_precompute_rope_params(ctx, node,
+                        (struct htp_rope_kernel_params *) op.kernel_params);
                 }
             }
             op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
