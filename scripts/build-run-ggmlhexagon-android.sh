@@ -117,13 +117,13 @@ function resolve_model_name()
     esac
 }
 
-PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly\n"
 
 #unified command-line parameters used during inference testing for fair performance comparison of PP and TG across the dspqueue and mempool/FastRPC ggml-hexagon variants
 #verified and test on 8Gen4 & 8Gen3
 #running_params=" --device HTP0 --cpu-mask 0xfc --cpu-strict 1 -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 #--device HTP0 is not mandatory for pure HTP tests, so these running_params can be used for dspqueue-based ggml-hexagon, fastrpc-based ggml-hexagon, cpu-only
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
+running_params=" -ngl 99 -t 6 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 
 ######## part-3: utilities and functions ########
 
@@ -1023,6 +1023,8 @@ function prepare_run_on_phone()
     adb shell "rm -f /data/local/tmp/${program}.farf"
     adb shell "touch /data/local/tmp/${program}.farf"
     adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
+    #observe cDSP's log
+    #adb logcat  | grep "CDSP0"
 }
 
 
@@ -1763,6 +1765,8 @@ function show_usage_for_developer()
     echo "      $0 run_ubatchtest                          # gemma4-e2b + 8/16/22/32/64/128/512/1024"
     echo "      $0 run_ubatchtest qwen3-2b                 # qwen3-2b   + 8/16/22/32/64/128/512/1024"
     echo "      $0 run_ubatchtest gemma4-e4b               # gemma4-e4b + 8/16/22/32/64/128/512/1024"
+    echo "      $0 run_ubatchtest spark-1b                 # spark-1b + 8/16/22/32/64/128/512/1024"
+    echo "      $0 run_ubatchtest spark-4b                 # spark-4b + 8/16/22/32/64/128/512/1024"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
