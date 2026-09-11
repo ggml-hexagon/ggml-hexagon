@@ -5728,6 +5728,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // to restore descriptors pointing to stale tensors.
     // cgraph pointer is NOT used: the scheduler rebuilds split->graph every
     // call, so the pointer churns. The content is stable.
+    // Hash over each node's {op, ne[4], nb[4], non-null src[0..GGML_MAX_SRC-1] ptr
+    // AND each src's ne[4]/nb[4], data ptr, op_params}. NULL srcs contribute
+    // nothing. Including src ne/nb/data ensures that KV-cache shape evolution
+    // across token-generation steps invalidates stale cache entries (otherwise
+    // cached kernel_params computed from old shapes would ship wrong fastdiv/VTCM
+    // values to the NPU).
     auto compute_content_hash = [&]() -> uint64_t {
         uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
         for (int i = 0; i < cgraph->n_nodes; i++) {
@@ -5741,6 +5747,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 if (src) {
                     h ^= (uint64_t)(uintptr_t)src ^ (uint64_t)j;
                     h *= 0x100000001b3ULL;
+                    // Hash src shape/strides so KV-cache ne[2] growth
+                    // across TG steps invalidates the cache entry.
+                    for (int k = 0; k < 4; k++) { h ^= (uint64_t)src->ne[k]; h *= 0x100000001b3ULL; }
+                    for (int k = 0; k < 4; k++) { h ^= (uint64_t)src->nb[k]; h *= 0x100000001b3ULL; }
+                    h ^= (uint64_t)(uintptr_t)src->data; h *= 0x100000001b3ULL;
                 }
             }
             h ^= (uint64_t)(uintptr_t)node->data; h *= 0x100000001b3ULL;
@@ -5767,9 +5778,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->cgraph_cache_misses++;
     }
 
-    // Bind to cached descriptors on hit, local vectors on miss. This avoids
-    // the expensive assign() of hex_ops/tensor_src in the hot path.
-    std::vector<ggml_tensor *> & tensor_src = cache_hit ? cached_entry->tensor_src  : local_tensor_src;
+    // Bind to cached op descriptors on hit, local vectors on miss. tensor_src
+    // is ALWAYS rebuilt from the current cgraph to ensure Phase 5/8 see live
+    // tensor pointers. The cached tensor pointers are valid (persistent structs)
+    // but rebuilding from the current cgraph guarantees consistency with the
+    // live graph state and avoids subtle drift from graph cache reuse.
+    std::vector<ggml_tensor *> & tensor_src = local_tensor_src;
     std::vector<hex_op_desc>   & hex_ops    = cache_hit ? cached_entry->hex_ops     : local_hex_ops;
     std::vector<uint8_t>       & is_weight  = cache_hit ? cached_entry->is_weight   : local_is_weight;
 
@@ -5778,8 +5792,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         n_ops     = (uint32_t)cached_entry->n_ops;
     }
 
-    if (!cache_hit) {
-        // ---- Collect supported ops (cache miss only) ----
+    // ---- Collect supported ops (always, to rebuild tensor_src) ----
+    {
         supported_nodes.reserve(cgraph->n_nodes);
         for (int i = 0; i < cgraph->n_nodes; i++) {
             ggml_tensor * node = cgraph->nodes[i];
@@ -5799,13 +5813,15 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
 
         tensor_src.reserve(cgraph->n_nodes);
-        hex_ops.reserve(supported_nodes.size());
+        if (!cache_hit) {
+            hex_ops.reserve(supported_nodes.size());
+        }
     }
 
     t_p1 = t_start; t_start = ggml_time_us(); ctx->cum_p1_us += t_start - t_p1;
 
-    // ---- Phase 2: build op descriptors (cache miss only) ----
-    if (!cache_hit) {
+    // ---- Phase 2: rebuild tensor_src always; build op descriptors on miss ----
+    {
         std::unordered_map<ggml_tensor *, int32_t> tensor_index_map;
         tensor_index_map.reserve(cgraph->n_nodes * 2);
         auto get_or_add_tensor_idx = [&](ggml_tensor * t) -> int32_t {
@@ -5818,99 +5834,124 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             return idx;
         };
 
-        for (auto * node : supported_nodes) {
-            hex_op_desc op;
-            memset(&op, 0, sizeof(op));
-            for (int k = 0; k < 4; k++) op.dst_idx[k] = -1;
-            for (int k = 0; k < HTP_OP_MAX_INPUTS; k++) op.src_idx[k] = -1;
-            op.opcode   = node->op;
-            memcpy(op.params, node->op_params, sizeof(op.params));
-            if (node->op == GGML_OP_MUL_MAT) {
-                ggml_hexagon_precompute_mm_params(ctx, node, op, false);
-                ctx->n_mul_mat_total_cum++;
-                if (((const struct htp_mm_kernel_params *) op.kernel_params)->n_hmx) {
-                    ctx->n_hmx_used_cum++;
+        if (!cache_hit) {
+            for (auto * node : supported_nodes) {
+                hex_op_desc op;
+                memset(&op, 0, sizeof(op));
+                for (int k = 0; k < 4; k++) op.dst_idx[k] = -1;
+                for (int k = 0; k < HTP_OP_MAX_INPUTS; k++) op.src_idx[k] = -1;
+                op.opcode   = node->op;
+                memcpy(op.params, node->op_params, sizeof(op.params));
+                if (node->op == GGML_OP_MUL_MAT) {
+                    ggml_hexagon_precompute_mm_params(ctx, node, op, false);
+                    ctx->n_mul_mat_total_cum++;
+                    if (((const struct htp_mm_kernel_params *) op.kernel_params)->n_hmx) {
+                        ctx->n_hmx_used_cum++;
+                    }
+                } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+                    ggml_hexagon_compute_fa_params(ctx, node,
+                        (struct htp_fa_kernel_params *) op.kernel_params);
+                } else {
+                    // Unary-family ops (NORM, RMS_NORM, SCALE, SQR, SQRT, UNARY_*,
+                    // L2_NORM, TRI) require host-precomputed htp_unary_kernel_params
+                    // since upstream commit fb30ba9a6. Without this the NPU reads
+                    // zeroed kparams (n_threads=0, etc.) and the output is garbled.
+                    uint32_t unary_htp_op = 0;
+                    if (ggml_op_to_htp_op_unary(node->op, node->op_params, &unary_htp_op)) {
+                        ggml_hexagon_precompute_unary_params(ctx, unary_htp_op,
+                            node->src[0], node->src[1], node,
+                            (struct htp_unary_kernel_params *) op.kernel_params);
+                        op.htp_opcode = (int32_t) unary_htp_op;
+                    } else if (node->op == GGML_OP_GET_ROWS) {
+                        ggml_hexagon_precompute_get_rows_params(ctx,
+                            node->src[0], node->src[1], node,
+                            (struct htp_get_rows_kernel_params *) op.kernel_params);
+                    } else if (node->op == GGML_OP_SET_ROWS) {
+                        ggml_hexagon_precompute_set_rows_params(ctx,
+                            node->src[0], node->src[1], node,
+                            (struct htp_set_rows_kernel_params *) op.kernel_params);
+                    } else if (node->op == GGML_OP_ROPE) {
+                        ggml_hexagon_precompute_rope_params(ctx, node,
+                            (struct htp_rope_kernel_params *) op.kernel_params);
+                    }
                 }
-            } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
-                ggml_hexagon_compute_fa_params(ctx, node,
-                    (struct htp_fa_kernel_params *) op.kernel_params);
-            } else {
-                // Unary-family ops (NORM, RMS_NORM, SCALE, SQR, SQRT, UNARY_*,
-                // L2_NORM, TRI) require host-precomputed htp_unary_kernel_params
-                // since upstream commit fb30ba9a6. Without this the NPU reads
-                // zeroed kparams (n_threads=0, etc.) and the output is garbled.
-                uint32_t unary_htp_op = 0;
-                if (ggml_op_to_htp_op_unary(node->op, node->op_params, &unary_htp_op)) {
-                    ggml_hexagon_precompute_unary_params(ctx, unary_htp_op,
-                        node->src[0], node->src[1], node,
-                        (struct htp_unary_kernel_params *) op.kernel_params);
-                    op.htp_opcode = (int32_t) unary_htp_op;
-                } else if (node->op == GGML_OP_GET_ROWS) {
-                    ggml_hexagon_precompute_get_rows_params(ctx,
-                        node->src[0], node->src[1], node,
-                        (struct htp_get_rows_kernel_params *) op.kernel_params);
-                } else if (node->op == GGML_OP_SET_ROWS) {
-                    ggml_hexagon_precompute_set_rows_params(ctx,
-                        node->src[0], node->src[1], node,
-                        (struct htp_set_rows_kernel_params *) op.kernel_params);
-                } else if (node->op == GGML_OP_ROPE) {
-                    ggml_hexagon_precompute_rope_params(ctx, node,
-                        (struct htp_rope_kernel_params *) op.kernel_params);
+                op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
+                op.src_idx[1] = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
+                op.src_idx[2] = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
+                op.src_idx[3] = (node->src[3]) ? get_or_add_tensor_idx(node->src[3]) : -1;
+                op.src_idx[4] = (node->src[4]) ? get_or_add_tensor_idx(node->src[4]) : -1;
+                op.src_idx[5] = (node->src[5]) ? get_or_add_tensor_idx(node->src[5]) : -1;
+                op.dst_idx[0]  = get_or_add_tensor_idx(node);
+                hex_ops.push_back(op);
+            }
+
+            n_tensors = (uint32_t)tensor_src.size();
+
+            GGMLHEXAGON_LOG_DEBUG("mempool-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
+            if (1 == g_hexagon_appcfg.dump_debug_info) {
+                for (size_t i = 0; i < hex_ops.size(); i++) {
+                    const hex_op_desc & o = hex_ops[i];
+                    GGML_UNUSED(o);
+                    GGMLHEXAGON_LOG_ALWAYS("  ion-op[%zu] %s: src0[t%d] src1[t%d] src2[t%d] dst[t%d]",
+                                      i, ggml_op_name((ggml_op)o.opcode),
+                                      o.src_idx[0], o.src_idx[1], o.src_idx[2], o.dst_idx[0]);
                 }
             }
-            op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
-            op.src_idx[1] = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
-            op.src_idx[2] = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
-            op.src_idx[3] = (node->src[3]) ? get_or_add_tensor_idx(node->src[3]) : -1;
-            op.src_idx[4] = (node->src[4]) ? get_or_add_tensor_idx(node->src[4]) : -1;
-            op.src_idx[5] = (node->src[5]) ? get_or_add_tensor_idx(node->src[5]) : -1;
-            op.dst_idx[0]  = get_or_add_tensor_idx(node);
-            hex_ops.push_back(op);
-        }
 
-        n_tensors = (uint32_t)tensor_src.size();
-
-        GGMLHEXAGON_LOG_DEBUG("mempool-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
-        if (1 == g_hexagon_appcfg.dump_debug_info) {
-            for (size_t i = 0; i < hex_ops.size(); i++) {
-                const hex_op_desc & o = hex_ops[i];
-                GGML_UNUSED(o);
-                GGMLHEXAGON_LOG_DEBUG("  ion-op[%zu] %s: src0[t%d] src1[t%d] src2[t%d] dst[t%d]",
-                                  i, ggml_op_name((ggml_op)o.opcode),
-                                  o.src_idx[0], o.src_idx[1], o.src_idx[2], o.dst_idx[0]);
-            }
-        }
-
-        // Identify weight tensors: src0 of MUL_MAT that is NOT dst of any op.
-        // Weights are read-only across batches; AP never modifies them per batch,
-        // so NPU-side first-touch invalidation can be skipped for them.
-        // A tensor that was dst of any op in ANY cgraph (not just this one) is
-        // not a read-only weight: check the session-global ever-dst set, else
-        // cross-graph staleness occurs with bit 0 (e.g. qwen3-mtp garble).
-        {
-            for (const auto & op : hex_ops) {
-                uint32_t didx = op.dst_idx[0];
-                if (didx < n_tensors) ctx->ever_dst_ptrs.insert(tensor_src[didx]->data);
-            }
-            is_weight.assign(n_tensors, 0);
-            std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
-            for (const auto & op : hex_ops) {
-                uint32_t didx = op.dst_idx[0];
-                if (didx < n_tensors) dst_indices[didx] = 1;
-            }
-            for (const auto & op : hex_ops) {
-                if (op.opcode == GGML_OP_MUL_MAT) {
-                    uint32_t sidx = op.src_idx[0];
-                    if (sidx < n_tensors && !dst_indices[sidx] &&
-                        !ctx->ever_dst_ptrs.count(tensor_src[sidx]->data)) {
-                        is_weight[sidx] = 1;
-                        GGMLHEXAGON_LOG_DEBUG("weight-cache: tensor[%d] identified as weight (type=%d)",
-                                              sidx, (int)tensor_src[sidx]->type);
+            // Identify weight tensors: src0 of MUL_MAT that is NOT dst of any op.
+            // Weights are read-only across batches; AP never modifies them per batch,
+            // so NPU-side first-touch invalidation can be skipped for them.
+            // A tensor that was dst of any op in ANY cgraph (not just this one) is
+            // not a read-only weight: check the session-global ever-dst set, else
+            // cross-graph staleness occurs with bit 0 (e.g. qwen3-mtp garble).
+            {
+                for (const auto & op : hex_ops) {
+                    uint32_t didx = op.dst_idx[0];
+                    if (didx < n_tensors) ctx->ever_dst_ptrs.insert(tensor_src[didx]->data);
+                }
+                is_weight.assign(n_tensors, 0);
+                std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
+                for (const auto & op : hex_ops) {
+                    uint32_t didx = op.dst_idx[0];
+                    if (didx < n_tensors) dst_indices[didx] = 1;
+                }
+                for (const auto & op : hex_ops) {
+                    if (op.opcode == GGML_OP_MUL_MAT) {
+                        uint32_t sidx = op.src_idx[0];
+                        if (sidx < n_tensors && !dst_indices[sidx] &&
+                            !ctx->ever_dst_ptrs.count(tensor_src[sidx]->data)) {
+                            is_weight[sidx] = 1;
+                            GGMLHEXAGON_LOG_DEBUG("weight-cache: tensor[%d] identified as weight (type=%d)",
+                                                  sidx, (int)tensor_src[sidx]->type);
+                        }
                     }
                 }
             }
+        } else {
+            // Cache hit: rebuild tensor_src from current cgraph. The content
+            // hash guarantees the graph structure is identical, so the tensor
+            // ordering from get_or_add_tensor_idx will match the cached hex_ops
+            // indices. This ensures Phase 5/8 see live tensor pointers and
+            // ne/nb/data from the current graph state.
+            for (auto * node : supported_nodes) {
+                get_or_add_tensor_idx(node->src[0]);
+                if (node->src[1]) get_or_add_tensor_idx(node->src[1]);
+                if (node->src[2]) get_or_add_tensor_idx(node->src[2]);
+                if (node->src[3]) get_or_add_tensor_idx(node->src[3]);
+                if (node->src[4]) get_or_add_tensor_idx(node->src[4]);
+                if (node->src[5]) get_or_add_tensor_idx(node->src[5]);
+                get_or_add_tensor_idx(node);
+            }
+
+            // Verify rebuilt tensor_src matches cached n_tensors (sanity check).
+            // A mismatch means a 64-bit hash collision; invalidate the entry.
+            if ((uint32_t)tensor_src.size() != n_tensors) {
+                GGMLHEXAGON_LOG_WARN("graph-cache: tensor_src size mismatch: rebuilt=%u cached=%u; "
+                                     "invalidating cache entry", (uint32_t)tensor_src.size(), n_tensors);
+                ctx->cgraph_cache.erase(content_hash);
+            }
         }
-    }  // end if (!cache_hit) for Phase 2
+    }  // end Phase 2
 
     t_p2 = t_start; t_start = ggml_time_us(); ctx->cum_p2_us += t_start - t_p2;
 
