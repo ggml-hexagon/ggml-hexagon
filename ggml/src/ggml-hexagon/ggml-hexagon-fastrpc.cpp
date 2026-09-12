@@ -3497,6 +3497,7 @@ static void ggml_hexagon_precompute_fused_qkv_params(
     size_t src3_sz = src3_sz_per_thread * (uint32_t)ctx->n_threads;
 
     size_t tiled_vtcm_size = src0_sz + src1_sz + src2_sz + src3_sz + quant_scratch_size;
+    kparams->n_threads = (int32_t) ctx->n_threads;
     if (tiled_vtcm_size <= vtcm_budget) {
         kparams->kernel_type = HTP_MM_KERNEL_HVX_QUANT_ROW;
         kparams->vtcm_src0_size = (int32_t) src0_sz;
@@ -3587,6 +3588,7 @@ static void ggml_hexagon_precompute_fused_ffn_params(
     size_t src2_sz = src2_sz_per_thread * (uint32_t)ctx->n_threads;
 
     size_t tiled_vtcm_size = src0_sz + src1_sz + src2_sz + quant_scratch_size;
+    kparams->n_threads = (int32_t) ctx->n_threads;
     if (tiled_vtcm_size <= vtcm_budget) {
         kparams->kernel_type = HTP_MM_KERNEL_HVX_QUANT_ROW;
         kparams->vtcm_src0_size = (int32_t) src0_sz;
@@ -4018,6 +4020,7 @@ static void ggml_hexagon_precompute_mm_params(
         is_matmul_id, vtcm_budget, kparams);
 
 finalize:
+    kparams->n_threads    = (int32_t) ctx->n_threads;
     kparams->div_ne12_ne1 = init_fastdiv_values((uint32_t)(ne12 * ne11));
     kparams->div_ne1      = init_fastdiv_values((uint32_t) ne11);
     kparams->div_r2       = init_fastdiv_values(ne02 > 0 ? (uint32_t)(ne12 / ne02) : 1);

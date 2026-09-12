@@ -19,6 +19,8 @@
 #include "dsp-ctx.h"
 #include "hmx-queue.h"
 #include "htp-ctx.h"
+#include "htp-tensor.h"
+#include "htp-fence.h"
 #include "matmul-ops.h"
 #include "flash-attn-ops.h"
 
@@ -1013,7 +1015,9 @@ static void build_htp_octx(
         octx->dsts[i] = (dst_idx[i] >= 0) ? &g_dsp_ctx->pre_ht[dst_idx[i]] : NULL;
     }
 
-    octx->n_threads = (uint32_t)g_dsp_ctx->thread_counts;
+    octx->n_threads     = (uint32_t)g_dsp_ctx->thread_counts;
+    octx->n_threads_div = g_dsp_ctx->htp_ctx->n_threads_div;
+    octx->status        = HTP_STATUS_OK;
 }
 
 // Try HMX precompute (simple 2D path). Mirrors ggml_hexagon_precompute_hmx_mm_params
@@ -2175,6 +2179,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             if (kp_kernel_type == 0) {
                 if (build_mm_kernel_params(&octx) != 0) {
                     dsp_queues_suspend();
+                    GGMLHEXAGON_LOG_ERROR("error");
                     return AEE_EFAILED;
                 }
             }
@@ -2220,8 +2225,11 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                 octx.kernel_params[16]);
         }
 #endif
+        htp_mdev_group_barrier(&octx);
 
         int op_ret = execute_op(&octx);
+
+        htp_ops_context_set_status(&octx, op_ret);
 
 #ifndef NDEBUG
         /* F32 MUL_MAT diagnostic: dump dst[0..3] and dst[16..19] AFTER execute_op. */
