@@ -135,7 +135,7 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
   https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the default branch, FastRPC-based ggml-hexagon & upstream dspqueue-based ggml-hexagon can be found in this branch.
 
 - pr_to_upstream_v3
-  [https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz](https://github.com/ggml-hexagon/ggml-hexagon/tree/pr_to_upstream_v3), candidate PR to upstream llama.cpp.
+  [https://github.com/zhouwg/ggml-hexagon/tree/pr_to_upstream_v3](https://github.com/ggml-hexagon/ggml-hexagon/tree/pr_to_upstream_v3), candidate PR to upstream llama.cpp.
 
 ## Introducing FastRPC-based ggml-hexagon
 
