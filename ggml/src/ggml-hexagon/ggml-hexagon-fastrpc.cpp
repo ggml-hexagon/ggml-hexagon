@@ -6092,7 +6092,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                 struct htp_mm_kernel_params kparams;
                                 ggml_hexagon_precompute_fused_qkv_params(ctx, n_k->src[0], n_k->src[1], &kparams);
                                 kparams.n_weights = 3;
-                                if ((size_t)kparams.vtcm_size <= vtcm_budget) {
+                                // Mempool-pressure guard: when the model doesn't fit the
+                                // single ION mempool, NX-fused weights and the shared activation
+                                // span the per-batch mirror window in ways Phase 3 cannot predict
+                                // and the fuse path can produce stale or overlapping reads. Skip
+                                // NX and fall back to three independent MUL_MATs when utilization
+                                // crosses 0.7.
+                                const bool mempool_overflow =
+                                    ctx->rpc_mempool_len > 0 &&
+                                    (double) ctx->rpc_mempool_usage / (double) ctx->rpc_mempool_len > 0.7;
+                                if (mempool_overflow) {
+                                    GGMLHEXAGON_LOG_ALWAYS("skip QKV fusion: mempool pressure (usage=%zu/%zu)",
+                                        (size_t) ctx->rpc_mempool_usage, (size_t) ctx->rpc_mempool_len);
+                                } else if ((size_t)kparams.vtcm_size <= vtcm_budget) {
                                     int32_t wq_idx  = op.src_idx[0];
                                     int32_t x_idx   = op.src_idx[1];
                                     int32_t q_dst   = op.dst_idx[0];
@@ -6106,6 +6118,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                     op.dst_idx[1]   = op_k->dst_idx[0];  // K
                                     op.dst_idx[2]   = op_v->dst_idx[0];  // V
                                     op.dst_idx[3]   = -1;
+                                    for (int s = 4; s < HTP_OP_MAX_INPUTS; s++) op.src_idx[s] = -1;
                                     memcpy(op.kernel_params, &kparams, sizeof(kparams));
                                     fused_ops.push_back(op);
                                     i += 2;
@@ -6141,7 +6154,15 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                             struct htp_mm_kernel_params kparams;
                             ggml_hexagon_precompute_fused_ffn_params(ctx, n_gate->src[0], n_gate->src[1], &kparams);
                             kparams.n_weights = 2;
-                            if ((size_t)kparams.vtcm_size <= vtcm_budget) {
+                            // Mempool-pressure guard: see QKV fusion comment for rationale;
+                            // skip NX when ION mempool utilization crosses 0.7.
+                            const bool mempool_overflow =
+                                ctx->rpc_mempool_len > 0 &&
+                                (double) ctx->rpc_mempool_usage / (double) ctx->rpc_mempool_len > 0.7;
+                            if (mempool_overflow) {
+                                GGMLHEXAGON_LOG_ALWAYS("skip FFN fusion: mempool pressure (usage=%zu/%zu)",
+                                    (size_t) ctx->rpc_mempool_usage, (size_t) ctx->rpc_mempool_len);
+                            } else if ((size_t)kparams.vtcm_size <= vtcm_budget) {
                                 op.htp_opcode = HTP_OP_MUL_MAT_NX;
                                 // NX layout: src[0..n_weights-1] = weights, src[n_weights] = activation
                                 int32_t wgate_idx = op.src_idx[0];
@@ -6154,6 +6175,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                 op.dst_idx[1] = next.dst_idx[0];
                                 op.dst_idx[2] = -1;
                                 op.dst_idx[3] = -1;
+                                for (int s = 4; s < HTP_OP_MAX_INPUTS; s++) op.src_idx[s] = -1;
                                 memcpy(op.kernel_params, &kparams, sizeof(kparams));
                                 fused_ops.push_back(op);
                                 i += 1;

@@ -49,6 +49,10 @@ extern "C" {
 #define DSP_OPT_MAX_BATCH_DSTS          (DSP_OPT_MAX_TENSORS * 4 * 4)
 #endif
 
+#ifndef HTP_OP_MAX_INPUTS
+#define HTP_OP_MAX_INPUTS               10
+#endif
+
 #ifndef HTP_OP_MAX_OUTPUTS
 #define HTP_OP_MAX_OUTPUTS              4
 #endif
