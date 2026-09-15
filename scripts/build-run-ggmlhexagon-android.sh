@@ -1149,7 +1149,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("llama3" "qwen1" "minicpm5-1b" "qwen3-2b" "qwen3-4b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "spark-1b" "spark-4b")
+    local models=("qwen1" "minicpm5-1b" "qwen3-2b" "qwen3-4b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "spark-1b" "spark-4b")
 
     local total=${#models[@]}
     local count=0
@@ -1704,7 +1704,7 @@ function show_usage_for_developer()
 
     echo "  $0 run_llamaserver_for_pi"
 
-    echo "  $0 run_llamacli_all     (batch test 11 models = 11 tests)"
+    echo "  $0 run_llamacli_all     (batch test 10 models = 10 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
