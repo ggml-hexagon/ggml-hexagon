@@ -81,12 +81,13 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
+#   llama3              -> Llama-3.2-1B-Instruct-Q4_0.gguf
+#   qwen1               -> qwen1_5-1_8b-chat-q4_0.gguf
 #   qwen3-2b            -> Qwen3.5-2B-Q4_0.gguf
+#   qwen3-4b            -> Qwen3.5-4B-Q4_0.gguf
 #   qwen3-9b            -> Qwen3.5-9B-Q4_0.gguf
 #   gemma4-e2b          -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
 #   gemma4-e4b          -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
-#   qwen1               -> qwen1_5-1_8b-chat-q4_0.gguf
-#   llama3              -> Llama-3.2-1B-Instruct-Q4_0.gguf
 #   nanbeige-3b         -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
 #   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   (default)           -> gemma-4-E2B-it-Q4_0.gguf
@@ -94,12 +95,11 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
 #   spark-1b            -> Spark-X2.5-1.7B.gguf
 #   spark-4b            -> Spark-X2.5-4B.gguf
-#   qwen3-9b-mtp        -> Qwen3.5-9B-D2-A-MTP-attnQ4.gguf
-#   macro-8b            -> Marco-Nano-Instruct.Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
         qwen3-2b)           echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
+        qwen3-4b)           echo "/sdcard/Qwen3.5-4B-Q4_0.gguf" ;;
         qwen3-9b)           echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
         gemma4-e2b)         echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
         gemma4-e4b)         echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
@@ -111,8 +111,6 @@ function resolve_model_name()
         minicpm5-1b-q80)    echo "/sdcard/MiniCPM5-1B-Q8_0.gguf";;
         spark-1b)           echo "/sdcard/Spark-X2.5-1.7B.gguf";;
         spark-4b)           echo "/sdcard/Spark-X2.5-4B.gguf";;
-        qwen3-9b-mtp)       echo "/sdcard/Qwen3.5-9B-D2-A-MTP-attnQ4.gguf";;
-        macro-8b)           echo "/sdcard/Marco-Nano-Instruct.Q4_0.gguf";;
         *)                  echo "" ; return 1 ;;
     esac
 }
@@ -646,11 +644,17 @@ function check_prebuilt_models()
 {
     set +e
 
+    #737 MiB
+    check_and_download_model Llama-3.2-1B-Instruct-Q4_0.gguf     https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf
+
     #1.12 GiB
     #check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
     #1.2 GiB
     check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
+
+    #2.58 GiB
+    check_and_download_model Qwen3.5-4B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_0.gguf
 
     #5.1 GiB
     check_and_download_model Qwen3.5-9B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_0.gguf
@@ -660,9 +664,6 @@ function check_prebuilt_models()
 
     # gemma-4-E4B_q4_0-it.gguf (4.9 GiB) is a stress-test model that triggers mirror/eviction in the 4GB ION mempool.
     check_and_download_model gemma-4-E4B_q4_0-it.gguf     https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf
-
-    #737 MiB
-    check_and_download_model Llama-3.2-1B-Instruct-Q4_0.gguf     https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf
 
     #2.4 GiB
     check_and_download_model Nanbeige_Nanbeige4.2-3B-Q4_0.gguf   https://huggingface.com/bartowski/Nanbeige_Nanbeige4.2-3B-GGUF/resolve/main/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
@@ -680,13 +681,7 @@ function check_prebuilt_models()
     check_and_download_model Spark-X2.5-1.7B.gguf               https://huggingface.co/XHToken/Spark-X2.5-1.7B-GGUF/resolve/main/Spark-X2.5-1.7B.gguf
 
     #7.7 GiB
-    check_and_download_model Spark-X2.5-4B.gguf                  https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B.gguf
-
-    #4.57 GiB
-    #check_and_download_model Marco-Nano-Instruct.Q4_0.gguf        https://huggingface.co/gat45/snapdragon-test-npu/resolve/main/Marco-Nano-Instruct.Q4_0.gguf
-
-    #2.11 GiB
-    #check_and_download_model Qwen3.5-9B-D2-A-MTP-attnQ4.gguf      https://huggingface.co/gat45/snapdragon-test-npu/resolve/main/Qwen3.5-9B-D2-A-MTP-attnQ4.gguf
+    #check_and_download_model Spark-X2.5-4B.gguf                  https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B.gguf
 
     set -e
 }
@@ -1060,10 +1055,12 @@ function run_llamacli()
     #GGML_HEXAGON_OPPOLL is only effective for the dspqueue variant, doesn't apply to the mempool/FastRPC variant
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_DEVICES=HTP0 \
                && export GGML_HEXAGON_OPPOLL=1 \
                && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_DEVICES=HTP0 \
                && export GGML_HEXAGON_OPPOLL=1 \
                && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
 
@@ -1380,7 +1377,7 @@ function run_abtest()
 
 function run_abtest_all()
 {
-    # Run AB test across all 8 supported models.
+    # Run AB test across all 10 verified models.
     # Usage: run_abtest_all [rounds]
     #   rounds: default 3 (per model); qwen3-9b is hard-capped to 1 (slow + high power, phone gets hot)
     #
@@ -1394,9 +1391,8 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    #local all_models="qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
-    local all_models="gemma4-e2b gemma4-e4b qwen3-2b nanbeige-3b llama3 qwen3-9b spark-1b spark-4b"
-    local total=8
+    local all_models="qwen1 minicpm5-1b llama3 qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
+    local total=10
     local idx=0
 
     for model_alias in ${all_models}; do
@@ -1668,7 +1664,7 @@ function show_usage()
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 8 models (gemma4-e2b gemma4-e4b qwen3-2b nanbeige-3b llama3 qwen3-9b spark-1b spark-4b)."
+    echo "    Batch AB test across all 10 models (qwen1 minicpm5-1b llama3 qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1678,21 +1674,19 @@ function show_usage()
     echo "  $0 run_llamabench   [model_alias]"
     echo "  Model aliases for run_llamacli:"
     echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
+    echo "    qwen3-4b      -> Qwen3.5-4B-Q4_0.gguf"
     echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
     echo "    gemma4-e2b    -> gemma-4-E2B-it-Q4_0.gguf"
     echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf"
-    echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
-    echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
     echo "    nanbeige-3b   -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf"
     echo "    minicpm5-1b   -> minicpm5-1b-q4_0.gguf"
     echo "    spark-1b      -> Spark-X2.5-1.7B.gguf"
     echo "    spark-4b      -> Spark-X2.5-4B.gguf"
-    echo "    qwen3-9b-mtp  -> Qwen3.5-9B-D2-A-MTP-attnQ4.gguf"
-    echo "    macro-8b      -> Marco-Nano-Instruct.Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli/run_llamabench              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
     echo "    $0 run_llamacli/run_llamabench qwen3-2b     # test qwen3-2b"
+    echo "    $0 run_llamacli/run_llamabench qwen3-4b     # test qwen3-4b"
     echo "    $0 run_llamacli/run_llamabench gemma4-e2b   # test gemma4-e2b"
     echo "    $0 run_llamacli/run_llamabench gemma4-e4b   # test gemma4-e4b"
     echo "    $0 run_llamacli/run_llamabench spark-1b     # test spark-1b"
@@ -1728,7 +1722,7 @@ function show_usage_for_developer()
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 8 models (qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
+    echo "    Batch AB test across all 10 models (qwen1 minicpm5-1b llama3 qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1882,7 +1876,7 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
         if [ -z "$(resolve_model_name "$2")" ]; then
-            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-4b, qwen3-9b, gemma4-e2b, gemma4-e4b, spark-1b, qwen1, llama3"
             show_usage
             exit 1
         fi
@@ -1890,7 +1884,7 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
         if [ -z "$(resolve_model_name "$2")" ]; then
-            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-4b, qwen3-9b, gemma4-e2b, gemma4-e4b, spark-1b, qwen1, llama3"
             show_usage
             exit 1
         fi
