@@ -86,25 +86,24 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   qwen3-2b            -> Qwen3.5-2B-Q4_0.gguf
 #   qwen3-4b            -> Qwen3.5-4B-Q4_0.gguf
 #   qwen3-9b            -> Qwen3.5-9B-Q4_0.gguf
-#   gemma4-e2b          -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
+#   gemma4-e2b          -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, default test model, fits entirely in FastRPC mempool)
 #   gemma4-e4b          -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
 #   nanbeige-3b         -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
-#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
-#   (default)           -> gemma-4-E2B-it-Q4_0.gguf
 #   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
+#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
 #   spark-1b            -> Spark-X2.5-1.7B.gguf
 #   spark-4b            -> Spark-X2.5-4B.gguf
 function resolve_model_name()
 {
     case "$1" in
+        llama3)             echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
+        qwen1)              echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
         qwen3-2b)           echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
         qwen3-4b)           echo "/sdcard/Qwen3.5-4B-Q4_0.gguf" ;;
         qwen3-9b)           echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
         gemma4-e2b)         echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
         gemma4-e4b)         echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
-        qwen1)              echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
-        llama3)             echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
         nanbeige-3b)        echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf";;
         nanbeige-3b-q80)    echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf";;
         minicpm5-1b)        echo "/sdcard/minicpm5-1b-q4_0.gguf";;
@@ -1154,7 +1153,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("qwen1" "minicpm5-1b" "qwen3-2b" "qwen3-4b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "spark-1b" "spark-4b")
+    local models=("llama3" "qwen1" "qwen3-2b" "qwen3-4b" "qwen3-9b" "gemma4-e2b" "gemma4-e4b" "nanbeige-3b" "nanbeige-3b-q80" "minicpm5-1b" "minicpm5-1b-q80" "spark-1b" "spark-4b")
 
     local total=${#models[@]}
     local count=0
@@ -1653,7 +1652,7 @@ function show_usage()
     echo "  $0 help"
 
     echo "  $0 build                    (build the mempool/FastRPC-invoke ggml-hexagon backend for performance comparision)"
-    echo "  $0 build_dspqueue           (build the dspqueue ggml-hexagon backend for performance comparison, Qualcomm's official dspqueu-based ggml-hexagon)"
+    echo "  $0 build_dspqueue           (build the dspqueue ggml-hexagon backend for performance comparison, Qualcomm's official ggml-hexagon)"
     echo "  $0 build_armcpu             (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
     echo "  $0 clean"
 
@@ -1668,13 +1667,12 @@ function show_usage()
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
     echo -e "\n"
 
-    echo "  $0 run_abtest_all [rounds]"
+    echo "  $0 run_abtest_all"
     echo "    Batch AB test across all 8 models (minicpm5-1b qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
-    echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
-    echo -e "\n"
 
+    echo -e "\n"
     echo "  $0 run_llamacli     [model_alias]"
     echo "  $0 run_llamabench   [model_alias]"
     echo "  Model aliases for run_llamacli:"
@@ -1687,7 +1685,6 @@ function show_usage()
     echo "    minicpm5-1b   -> minicpm5-1b-q4_0.gguf"
     echo "    spark-1b      -> Spark-X2.5-1.7B.gguf"
     echo "    spark-4b      -> Spark-X2.5-4B.gguf"
-    echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli/run_llamabench              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
     echo "    $0 run_llamacli/run_llamabench qwen3-2b     # test qwen3-2b"
@@ -1709,7 +1706,7 @@ function show_usage_for_developer()
 
     echo "  $0 run_llamaserver_for_pi"
 
-    echo "  $0 run_llamacli_all     (batch test 10 models = 10 tests)"
+    echo "  $0 run_llamacli_all     (batch test 13 models = 13 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"

@@ -6225,15 +6225,34 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                     kparams_mm->n_hmx, src1_nrows, kparams_mm->kernel_type);
                                 n_mm_add_skip_use_count++;
                             } else {
-                                // Keep Phase 2 kparams as-is: the DSP-side kernel builds its
-                                // own VTCM layout (including the fused bias slice) and only
-                                // uses kparams->vtcm_size for the reservation check. Rebuilding
-                                // the layout on the AP side regressed Llama-3.2-1B: the rebuilt
-                                // total adds the bias slice on top of an exactly-fitting Phase 2
-                                // total (8388608), the budget check then skipped the fusion, and
-                                // the already-overwritten kparams shipped with the unfused op,
-                                // which the DSP rejected with VTCM_TOO_SMALL (0x80000401).
-                                if ((size_t) kparams_mm->vtcm_size <= vtcm_budget) {
+                                // Compute VTCM with the fused bias slice to get the actual
+                                // VTCM the DSP will need. Phase 2 precompute doesn't know
+                                // about src2, so kparams->vtcm_size excludes the bias slice.
+                                const ggml_tensor * bias_tensor = tensor_src[bias_idx];
+                                const ggml_tensor * w_tensor    = tensor_src[op.src_idx[0]];
+                                const ggml_tensor * a_tensor    = tensor_src[op.src_idx[1]];
+                                const ggml_tensor * d_tensor    = tensor_src[op.dst_idx[0]];
+                                const int bias_wtype = (int)ggml_hexagon_weight_dsp_type(w_tensor->type);
+
+                                struct htp_mm_hvx_vtcm_layout vtcm_fused;
+                                htp_mm_hvx_vtcm_layout_build(&vtcm_fused,
+                                    kparams_mm->kernel_type, bias_wtype,
+                                    (uint32_t)w_tensor->ne[0], (uint32_t)src1_nrows,
+                                    (uint32_t)ctx->n_threads,
+                                    d_tensor->nb[1], w_tensor->nb[1], a_tensor->nb[1],
+                                    bias_tensor->nb[1],
+                                    (uint32_t)kparams_mm->n_prefetch, false, false);
+
+                                if (vtcm_fused.total_bytes <= vtcm_budget) {
+                                    // Update kparams so DSP VTCM check matches the actual layout.
+                                    // Cast away const: op.kernel_params is mutable storage owned
+                                    // by the op descriptor.
+                                    struct htp_mm_kernel_params * kparams_mut =
+                                        (struct htp_mm_kernel_params *) op.kernel_params;
+                                    kparams_mut->vtcm_size      = (int32_t) vtcm_fused.total_bytes;
+                                    kparams_mut->vtcm_src0_size = (int32_t) vtcm_fused.src0_bytes;
+                                    kparams_mut->vtcm_src1_size = (int32_t) vtcm_fused.src1_bytes;
+                                    kparams_mut->vtcm_dst_size  = (int32_t) vtcm_fused.dst_bytes;
                                     op.htp_opcode = HTP_OP_MUL_MAT_ADD;
                                     op.src_idx[2]   = bias_idx;
                                     op.dst_idx[0]    = next.dst_idx[0];
@@ -6243,8 +6262,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                     ctx->n_fused_mm_add_cum++;
                                     continue;
                                 } else {
-                                    GGMLHEXAGON_LOG_INFO("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
-                                                           (int) kparams_mm->vtcm_size, vtcm_budget);
+                                    GGMLHEXAGON_LOG_INFO("skip MUL_MAT_ADD fusion: VTCM needed (%zu) > budget (%zu)",
+                                                           vtcm_fused.total_bytes, vtcm_budget);
                                     n_mm_add_skip_vtcm++;
                                 }
                             }
@@ -6637,7 +6656,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         // weights may be stored in a different format (see set_tensor);
         // the NPU only knows the storage-type kernels
-        td->type = (int32_t)ggml_hexagon_weight_dsp_type(t->type);
+        td->type  = (int32_t)ggml_hexagon_weight_dsp_type(t->type);
         td->ne[0] = (int32_t)t->ne[0]; td->ne[1] = (int32_t)t->ne[1];
         td->ne[2] = (int32_t)t->ne[2]; td->ne[3] = (int32_t)t->ne[3];
         td->nb[0] = (int32_t)t->nb[0]; td->nb[1] = (int32_t)t->nb[1];
