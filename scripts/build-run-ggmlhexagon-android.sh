@@ -1149,7 +1149,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("qwen1" "minicpm5-1b" "llama3" "qwen3-2b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "spark-1b" "spark-4b")
+    local models=("llama3" "qwen1" "minicpm5-1b" "qwen3-2b" "qwen3-4b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "spark-1b" "spark-4b")
 
     local total=${#models[@]}
     local count=0
@@ -1377,7 +1377,7 @@ function run_abtest()
 
 function run_abtest_all()
 {
-    # Run AB test across all 10 verified models.
+    # Run AB test across all 8 verified models.
     # Usage: run_abtest_all [rounds]
     #   rounds: default 3 (per model); qwen3-9b is hard-capped to 1 (slow + high power, phone gets hot)
     #
@@ -1391,8 +1391,8 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    local all_models="qwen1 minicpm5-1b llama3 qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
-    local total=10
+    local all_models="minicpm5-1b qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
+    local total=8
     local idx=0
 
     for model_alias in ${all_models}; do
@@ -1664,7 +1664,7 @@ function show_usage()
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 10 models (qwen1 minicpm5-1b llama3 qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
+    echo "    Batch AB test across all 8 models (minicpm5-1b qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1704,7 +1704,7 @@ function show_usage_for_developer()
 
     echo "  $0 run_llamaserver_for_pi"
 
-    echo "  $0 run_llamacli_all     (batch test 8 models = 8 tests)"
+    echo "  $0 run_llamacli_all     (batch test 11 models = 11 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
@@ -1719,28 +1719,6 @@ function show_usage_for_developer()
     echo "      $0 run_abtest 3 qwen3-2b           # 3 rounds, qwen3-2b"
     echo "    Log capture example:"
     echo "      $0 run_abtest 2>&1 | tee log_abtest_\$(date +%Y%m%d-%H%M%S).txt"
-    echo -e "\n"
-
-    echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 10 models (qwen1 minicpm5-1b llama3 qwen3-2b qwen3-4b spark-1b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
-    echo "    rounds: default 3"
-    echo "    Log capture example:"
-    echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
-    echo -e "\n"
-
-    echo "  $0 run_llamacli   [model_alias]"
-    echo "  Model aliases for run_llamacli:"
-    echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
-    echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
-    echo "    gemma4-e2b    -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB)"
-    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, stress test for mirror/eviction)"
-    echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
-    echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
-    echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
-    echo "  Examples:"
-    echo "    $0 run_llamacli qwen3-2b     # test qwen3-2b"
-    echo "    $0 run_llamacli gemma4-e2b   # test gemma4-e2b"
-    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b (mirror stress test)"
     echo -e "\n"
 
     echo "  $0 run_stresstest"
