@@ -4302,7 +4302,7 @@ static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml
     const int mode   = op_params[2];
     const int n_offs = op_params[15];
 
-    if (n_dims <= 0 || n_dims % 2 != 0) {
+    if (n_dims < 0 || n_dims % 2 != 0) {
         return false;
     }
 
@@ -4313,7 +4313,7 @@ static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml
 
     float freq_base;
     memcpy(&freq_base, op_params + 5, sizeof(float));
-    if (freq_base <= 0.0f) {
+    if (freq_base < 0.0f) {
         return false;
     }
 
