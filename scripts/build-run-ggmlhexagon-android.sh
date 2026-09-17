@@ -81,34 +81,42 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
-#   llama3              -> Llama-3.2-1B-Instruct-Q4_0.gguf
-#   qwen1               -> qwen1_5-1_8b-chat-q4_0.gguf
+# 8 models for PP & TG Performance Comparison: dspqueue-based ggml-hexagon vs FastRPC-based ggml-hexagon
+# automatically downloadded on first run
+#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   qwen3-2b            -> Qwen3.5-2B-Q4_0.gguf
 #   qwen3-4b            -> Qwen3.5-4B-Q4_0.gguf
-#   qwen3-9b            -> Qwen3.5-9B-Q4_0.gguf
+#   spark-1b            -> Spark-X2.5-1.7B.gguf
 #   gemma4-e2b          -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, default test model, fits entirely in FastRPC mempool)
 #   gemma4-e4b          -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
 #   nanbeige-3b         -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
+#   qwen3-9b            -> Qwen3.5-9B-Q4_0.gguf
+#
+#models for development purposes
+#   llama3              -> Llama-3.2-1B-Instruct-Q4_0.gguf
+#   qwen1               -> qwen1_5-1_8b-chat-q4_0.gguf
 #   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
-#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
-#   spark-1b            -> Spark-X2.5-1.7B.gguf
+#   minicpm5-1b-q4-k-m  -> MiniCPM5-1B-Q4_K_M.gguf
+#   minicpm5-2b-q80     -> MiniCPM5-2B-Q8_0.gguf
 #   spark-4b            -> Spark-X2.5-4B.gguf
 function resolve_model_name()
 {
     case "$1" in
-        llama3)             echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
-        qwen1)              echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
+        minicpm5-1b)        echo "/sdcard/minicpm5-1b-q4_0.gguf";;
         qwen3-2b)           echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
         qwen3-4b)           echo "/sdcard/Qwen3.5-4B-Q4_0.gguf" ;;
-        qwen3-9b)           echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
+        spark-1b)           echo "/sdcard/Spark-X2.5-1.7B.gguf";;
         gemma4-e2b)         echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
         gemma4-e4b)         echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
         nanbeige-3b)        echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf";;
+        qwen3-9b)           echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
+        llama3)             echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
+        qwen1)              echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
         nanbeige-3b-q80)    echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf";;
-        minicpm5-1b)        echo "/sdcard/minicpm5-1b-q4_0.gguf";;
         minicpm5-1b-q80)    echo "/sdcard/MiniCPM5-1B-Q8_0.gguf";;
-        spark-1b)           echo "/sdcard/Spark-X2.5-1.7B.gguf";;
+        minicpm5-1b-q4-k-m) echo "/sdcard/minicpm5-1B-Q4_K_M.gguf";;
+        minicpm5-2b-q80)    echo "/sdcard/MiniCPM5-2B-Q8_0.gguf";;
         spark-4b)           echo "/sdcard/Spark-X2.5-4B.gguf";;
         *)                  echo "" ; return 1 ;;
     esac
@@ -1153,7 +1161,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("llama3" "qwen1" "qwen3-2b" "qwen3-4b" "qwen3-9b" "gemma4-e2b" "gemma4-e4b" "nanbeige-3b" "nanbeige-3b-q80" "minicpm5-1b" "minicpm5-1b-q80" "spark-1b" "spark-4b")
+    local models=("minicpm5-1b" "qwen3-2b" "qwen3-4b" "spark-1b" "gemma4-e2b" "gemma4-e4b" "nanbeige-3b" "qwen3-9b" "llama3" "qwen1" "nanbeige-3b-q80" "minicpm5-1b-q80" "minicpm5-1b-q4-k-m" "minicpm5-2b-q80" "spark-4b")
 
     local total=${#models[@]}
     local count=0
@@ -1706,7 +1714,7 @@ function show_usage_for_developer()
 
     echo "  $0 run_llamaserver_for_pi"
 
-    echo "  $0 run_llamacli_all     (batch test 13 models = 13 tests)"
+    echo "  $0 run_llamacli_all     (batch test 15 models = 15 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
