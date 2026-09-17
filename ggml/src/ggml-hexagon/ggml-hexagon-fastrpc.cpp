@@ -3380,6 +3380,7 @@ static bool mm_is_hmx_eligible(const ggml_backend_hexagon_context * ctx, const g
 static bool is_mergeable_mul_mat(const ggml_backend_hexagon_context * ctx, const ggml_tensor * t) {
     if (!t || t->op != GGML_OP_MUL_MAT)   return false;
     if (t->src[1]->type != GGML_TYPE_F32) return false;
+    if (t->src[0]->ne[2] != 1 || t->src[0]->ne[3] != 1) return false;
     return ggml_is_quantized(t->src[0]->type) && !mm_is_hmx_eligible(ctx, t);
 }
 
@@ -3435,7 +3436,7 @@ static void ggml_hexagon_precompute_fused_qkv_params(
 ) {
     memset(kparams, 0, sizeof(*kparams));
 
-    const int wtype = src0->type;
+    const int wtype = (int) ggml_hexagon_weight_dsp_type((ggml_type) src0->type);
     const bool is_repack = ggml_hexagon_is_repack_type((ggml_type) wtype);
 
     const int ne10 = src1->ne[0];
@@ -3532,7 +3533,7 @@ static void ggml_hexagon_precompute_fused_ffn_params(
 ) {
     memset(kparams, 0, sizeof(*kparams));
 
-    const int wtype = src0->type;
+    const int wtype = (int) ggml_hexagon_weight_dsp_type((ggml_type) src0->type);
     const bool is_repack = ggml_hexagon_is_repack_type((ggml_type) wtype);
 
     const int ne10 = src1->ne[0];
@@ -4071,7 +4072,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
         {
-            if (src0->ne[0] % 32) {
+            if (src0->ne[0] % ((src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q5_K || src0->type == GGML_TYPE_Q6_K) ? QK_K : 32)) {
                 return false;
             }
 
@@ -7628,6 +7629,22 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
         static std::mutex mutex;
         std::lock_guard<std::mutex> lock(mutex);
         if (!initialized) {
+            // Basic sanity checks to make sure definitions match
+            static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_Q4_1 == (unsigned int) GGML_TYPE_Q4_1,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_Q8_0 == (unsigned int) GGML_TYPE_Q8_0,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_MXFP4 == (unsigned int) GGML_TYPE_MXFP4,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_IQ4_NL == (unsigned int) GGML_TYPE_IQ4_NL,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_Q4_K == (unsigned int) GGML_TYPE_Q4_K,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_Q6_K == (unsigned int) GGML_TYPE_Q6_K,
+                          "please update hexagon_type to match ggml_type");
+
             int ret = htpdrv_init();
             if (AEE_SUCCESS != ret) {
                 GGMLHEXAGON_LOG_ERROR("htpdrv_init failed with error %d", ret);
