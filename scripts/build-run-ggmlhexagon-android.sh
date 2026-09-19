@@ -100,6 +100,7 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   minicpm5-1b-q4-k-m  -> MiniCPM5-1B-Q4_K_M.gguf
 #   minicpm5-2b-q80     -> MiniCPM5-2B-Q8_0.gguf
 #   spark-4b            -> Spark-X2.5-4B.gguf
+#   qwen3-27b           -> Ternary-Bonsai-2-27B-PTQ1_0.gguf
 function resolve_model_name()
 {
     case "$1" in
@@ -118,6 +119,7 @@ function resolve_model_name()
         minicpm5-1b-q4-k-m) echo "/sdcard/minicpm5-1B-Q4_K_M.gguf";;
         minicpm5-2b-q80)    echo "/sdcard/MiniCPM5-2B-Q8_0.gguf";;
         spark-4b)           echo "/sdcard/Spark-X2.5-4B.gguf";;
+        qwen3-27b)          echo "/sdcard/Ternary-Bonsai-2-27B-PTQ1_0.gguf";;
         *)                  echo "" ; return 1 ;;
     esac
 }
