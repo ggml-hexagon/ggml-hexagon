@@ -3013,15 +3013,22 @@ static bool ggml_hexagon_compute_fa_params(
     bool hmx_eligible = false;
     if (ctx->has_hmx && ggml_hexagon_get_fa_select() >= 2 &&
         k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16) {
-        if (DK % 64 == 0 && DV % 64 == 0 && !(DK <= 128 && neq1 < 5)) {
+        // Head dims that are not multiples of 64 are handled by internally padding to
+        // DK_pad/DV_pad = round_up(.,64) and zero-filling the tail lanes.
+        if (DK % 8 == 0 && DV % 8 == 0 && !(DK <= 128 && neq1 < 5)) {
             hmx_eligible = true;
         }
     }
 
     if (hmx_eligible) {
+        // HMX tiles head_dim in units of 64; when DK/DV are not 64-aligned the kernel
+        // operates on padded dims with zero-filled tail lanes. VTCM budget and chunk-size
+        // are sized for the padded tiles.
+        const uint32_t DK_pad = hex_round_up(DK, 64);
+        const uint32_t DV_pad = hex_round_up(DV, 64);
         size_t Br = 0, Bc = 0;
         const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
-        int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK, DV, neq1, nek1,
+        int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK_pad, DV_pad, neq1, nek1,
                                          vtcm_budget, (size_t) ctx->n_threads,
                                          kparams->is_q_fp32 != 0);
         if (ret == 0) {
@@ -3034,7 +3041,7 @@ static bool ggml_hexagon_compute_fa_params(
             kparams->u.hmx.g_br      = hex_align_up(G * Br, 32);
             kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && ctx->n_threads >= 2) ? 1 : 0;
             kparams->vtcm_size       = (uint32_t) hmx_fa_compute_vtcm_usage(
-                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0,
+                G, DK_pad, DV_pad, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0,
                 kparams->is_q_fp32 != 0);
 
             const size_t row_vec_bytes = hex_align_up(Bc * sizeof(uint16_t), 256);
@@ -4695,21 +4702,11 @@ static bool hexagon_validate_im2col(ggml_backend_hexagon_context * ctx, const gg
     GGML_UNUSED(ctx);
     const struct ggml_tensor * src1 = op->src[1];
     const struct ggml_tensor * dst  = op;
-    const bool is_2D = ((const int32_t *) op->op_params)[6] == 1;
-    if (!is_2D) {
-        return false;
-    }
     // F32 image -> F16/F32 columns only
     if (src1->type != GGML_TYPE_F32 || (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32)) {
         return false;
     }
     if (!ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
-        return false;
-    }
-    // padded im2col stays on CPU; NPU path only covers patch-embed shape
-    const int32_t p0 = ((const int32_t *) op->op_params)[2];
-    const int32_t p1 = ((const int32_t *) op->op_params)[3];
-    if (p0 != 0 || p1 != 0) {
         return false;
     }
     return true;
@@ -4791,6 +4788,30 @@ static bool hexagon_validate_fill(ggml_backend_hexagon_context * ctx, const ggml
     GGML_UNUSED(ctx);
     if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16)
         return false;
+    return true;
+}
+
+static bool hexagon_validate_roll(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
+    GGML_UNUSED(ctx);
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_are_same_shape(src0, dst)) {
+        return false;
+    }
+
+    if (src0->nb[0] != ggml_type_size(src0->type) || dst->nb[0] != ggml_type_size(dst->type)) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(dst)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -4908,6 +4929,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_TRI]            = hexagon_validate_tri;
     s_op_validators[GGML_OP_SOLVE_TRI]      = hexagon_validate_solve_tri;
     s_op_validators[GGML_OP_FILL]           = hexagon_validate_fill;
+    s_op_validators[GGML_OP_ROLL]           = hexagon_validate_roll;
     s_op_validators[GGML_OP_FLASH_ATTN_EXT] = hexagon_validate_flash_attn;
 }
 
