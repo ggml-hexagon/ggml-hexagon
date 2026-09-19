@@ -172,6 +172,7 @@ static const char * htp_op_short_name(unsigned int op) {
         case HTP_OP_GLU_SWIGLU:      return "GLU_SWIGLU";
         case HTP_OP_GLU_SWIGLU_OAI:  return "GLU_SWIGLU_OAI";
         case HTP_OP_GLU_GEGLU:       return "GLU_GEGLU";
+        case HTP_OP_GLU_GEGLU_QUICK: return "GLU_GEGLU_QUICK";
         case HTP_OP_SOFTMAX:         return "SOFTMAX";
         case HTP_OP_ROPE:            return "ROPE";
         case HTP_OP_FLASH_ATTN_EXT:  return "FLASH_ATTN_EXT";
@@ -181,6 +182,7 @@ static const char * htp_op_short_name(unsigned int op) {
         case HTP_OP_CPY:             return "CPY";
         case HTP_OP_REPEAT:          return "REPEAT";
         case HTP_OP_ARGSORT:         return "ARGSORT";
+        case HTP_OP_TOP_K:           return "TOP_K";
         case HTP_OP_SSM_CONV:        return "SSM_CONV";
         case HTP_OP_CUMSUM:          return "CUMSUM";
         case HTP_OP_FILL:            return "FILL";
@@ -795,6 +797,7 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_GLU_SWIGLU_OAI]  = op_activations,
     [HTP_OP_GLU_SWIGLU_CLAMP] = op_activations,
     [HTP_OP_GLU_GEGLU]       = op_activations,
+    [HTP_OP_GLU_GEGLU_QUICK] = op_activations,
     [HTP_OP_SOFTMAX]         = op_softmax,
     [HTP_OP_ADD_ID]          = op_binary,
     [HTP_OP_ROPE]            = op_rope,
@@ -805,6 +808,7 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_CPY]             = op_cpy,
     [HTP_OP_REPEAT]          = op_repeat,
     [HTP_OP_ARGSORT]         = op_argsort,
+    [HTP_OP_TOP_K]           = op_top_k,
     [HTP_OP_SSM_CONV]        = op_ssm_conv,
     [HTP_OP_CUMSUM]          = op_cumsum,
     [HTP_OP_FILL]            = op_fill,
@@ -968,11 +972,13 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
                 case GGML_GLU_OP_SWIGLU_OAI:  *htp_op = HTP_OP_GLU_SWIGLU_OAI;  return 0;
                 case GGML_GLU_OP_SWIGLU_CLAMP: *htp_op = HTP_OP_GLU_SWIGLU_CLAMP; return 0;
                 case GGML_GLU_OP_GEGLU:       *htp_op = HTP_OP_GLU_GEGLU;       return 0;
+                case GGML_GLU_OP_GEGLU_QUICK: *htp_op = HTP_OP_GLU_GEGLU_QUICK; return 0;
                 default:
                     FARF(ERROR, "ggml_op_to_htp_op: unsupported glu_op %d", op_params[0]);
                     return -1;
             }
         }
+        case GGML_OP_TOP_K:    *htp_op = HTP_OP_TOP_K;        return 0;
         default:
             FARF(ERROR, "ggml_op_to_htp_op: unsupported ggml_op %d", ggml_op);
             return -1;

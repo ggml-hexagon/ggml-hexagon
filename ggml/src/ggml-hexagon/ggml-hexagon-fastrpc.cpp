@@ -4483,6 +4483,7 @@ static bool hexagon_validate_glu(ggml_backend_hexagon_context * ctx, const ggml_
         case GGML_GLU_OP_SWIGLU_OAI:
         case GGML_GLU_OP_SWIGLU_CLAMP:
         case GGML_GLU_OP_GEGLU:
+        case GGML_GLU_OP_GEGLU_QUICK:
             return true;
         default:
             return false;
@@ -4522,11 +4523,12 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const 
         return false;
     }
 
-    if (src0->type != GGML_TYPE_F32 && src0->ne[0] < 32) {
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_I32 && src0->ne[0] < 32) {
         return false;
     }
 
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_Q8_0) {
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
+        src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_I32) {
         return false;
     }
 
@@ -4534,7 +4536,12 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const 
         return false;
     }
 
-    if (dst->type != GGML_TYPE_F32) {
+    if (src0->type == GGML_TYPE_I32) {
+        if (dst->type != GGML_TYPE_I32) {
+            return false;
+        }
+    }
+    else if (dst->type != GGML_TYPE_F32) {
         return false;
     }
 
@@ -4683,6 +4690,31 @@ static bool hexagon_validate_argsort(ggml_backend_hexagon_context * ctx, const g
 
     if (src0->ne[0] > (16 * 1024))
         return false;
+
+    return true;
+}
+
+static bool hexagon_validate_top_k(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
+    GGML_UNUSED(ctx);
+    const ggml_tensor * src0 = op->src[0]; // values
+    const ggml_tensor * dst  = op;         // indices
+
+    if (src0->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (dst->type != GGML_TYPE_I32) {
+        return false;
+    }
+
+    // Single row uses the threaded chunk+merge path. Multi-row uses one full
+    // buffer per thread, so it keeps the tighter 64K cap.
+    const bool single_row = (src0->ne[1] == 1 && src0->ne[2] == 1 && src0->ne[3] == 1);
+    const int64_t max_ne00 = single_row ? (256*1024) : (64*1024);
+
+    if (src0->ne[0] > max_ne00) {
+        return false;
+    }
 
     return true;
 }
@@ -4923,6 +4955,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_CUMSUM]         = hexagon_validate_cumsum;
     s_op_validators[GGML_OP_DIAG]           = hexagon_validate_diag;
     s_op_validators[GGML_OP_ARGSORT]        = hexagon_validate_argsort;
+    s_op_validators[GGML_OP_TOP_K]          = hexagon_validate_top_k;
     s_op_validators[GGML_OP_PAD]            = hexagon_validate_pad;
     s_op_validators[GGML_OP_IM2COL]         = hexagon_validate_im2col;
     s_op_validators[GGML_OP_GATED_DELTA_NET]= hexagon_validate_gated_delta_net;
